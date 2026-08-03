@@ -1,0 +1,38 @@
+# Batched transpose swaps the last two dimensions of a contiguous rank-3 tensor.
+# Migrated from TileKernels-Metax tile_kernels/transpose/batched_transpose_kernel.py,
+# source commit 79461d72d6f97f91b89403705a841c9d4c1eddd6.
+
+BatchedTransposeFwdOp:
+  ref_api: "torch.transpose"
+  family: transpose
+  status: spec-only
+
+  signature:
+    inputs:
+      input: {dtype: "float8_e4m3fn | bfloat16 | float32", shape: "[B, M, N]"}
+    outputs:
+      output: {dtype: "same_as(input)", shape: "[B, N, M]"}
+    shape_rules:
+    - "input.ndim == 3"
+    - "output.shape == (input.shape[0], input.shape[2], input.shape[1])"
+
+  workloads:
+  - {input_shape: [8, 4032, 576], dtypes: [float8_e4m3fn, bfloat16, float32], label: "source-hidden576"}
+  - {input_shape: [8, 4032, 4096], dtypes: [float8_e4m3fn, bfloat16], label: "source-hidden4096"}
+  - {input_shape: [8, 4033, 577], dtypes: [bfloat16, float32], label: "nonaligned-tail"}
+
+  roofline:
+    vars:
+      NUMEL: "product(input.shape)"
+    # Pure data movement: read input once and write output once.
+    flops: "0"
+    bytes: "2 * NUMEL * elem_bytes"
+
+  source:
+    kernel: tileops/kernels/transpose.py
+    kernel_map:
+      batched_transpose: BatchedTransposeKernel
+    op: tileops/ops/transpose.py
+    test: tests/ops/test_batched_transpose.py
+    bench: benchmarks/ops/bench_batched_transpose.py
+    bench_manifest_driven: true

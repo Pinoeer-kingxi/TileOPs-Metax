@@ -428,6 +428,102 @@ GroupCountFwdOp:
     test: tests/ops/test_group_count.py
     bench: benchmarks/ops/bench_group_count.py
 
+MoeTop2SumGateFwdOp:
+  ref_api: "none"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      logits:
+        dtype: float32
+        note: router scores, shape [num_tokens, num_routed_experts]
+      bias:
+        dtype: float32
+        note: per-routed-expert bias, shape [num_routed_experts]
+    outputs:
+      topk_idx:
+        dtype: int64
+        note: selected expert indices after optional physical mapping and EP/TP mask
+      topk_weights:
+        dtype: float32
+        note: normalized routing weights
+    params:
+      num_topk: {type: int}
+      num_topk_groups: {type: int}
+      num_groups: {type: int}
+      use_shared_as_routed: {type: bool, default: false}
+      num_shared_experts: {type: int, default: 0}
+      routed_scaling_factor: {type: float, default: 1.0}
+      ep_rank: {type: int, default: 0}
+      num_ep_ranks: {type: int, default: 1}
+      tp_rank: {type: int, default: 0}
+      num_tp_ranks: {type: int, default: 1}
+      scoring_func: {type: str, default: sigmoid}
+      mask:
+        type: "torch.Tensor | None"
+        default: null
+        note: optional bool tensor [num_tokens]; False tokens write -1 / 0 outputs
+      fix_routing_mask:
+        type: "torch.Tensor | None"
+        default: null
+        note: optional bool tensor [num_tokens]; True tokens reuse unmapped_topk_idx
+      to_physical_map:
+        type: "torch.Tensor | None"
+        default: null
+        note: optional int32 tensor [num_logical_experts, num_duplicate_experts]
+      logical_count:
+        type: "torch.Tensor | None"
+        default: null
+        note: optional int32 tensor [num_logical_experts]
+      unmapped_topk_idx:
+        type: "torch.Tensor | None"
+        default: null
+        note: optional int64 tensor [num_tokens, num_topk], updated in-place
+    shape_rules:
+    - "logits.ndim == 2"
+    - "bias.shape == (logits.shape[1],)"
+    - "num_topk > 0"
+    - "num_topk <= logits.shape[1]"
+    - "(num_groups == 0) == (num_topk_groups == 0)"
+    - "num_topk_groups <= num_groups"
+    - "num_ep_ranks > 0"
+    - "num_tp_ranks > 0"
+    - "0 <= ep_rank < num_ep_ranks"
+    - "0 <= tp_rank < num_tp_ranks"
+    - "topk_idx.shape == (logits.shape[0], num_topk + (num_shared_experts if use_shared_as_routed else 0))"
+    - "topk_weights.shape == topk_idx.shape"
+
+  workloads:
+    # Source coverage includes no-group, grouped, shared-expert, mask,
+    # fixed-routing, physical-map, and EP/TP-mask paths. These workloads
+    # pin representative C500 validation points for the Manifest contract;
+    # PR B will expand correctness and benchmark matrices.
+  - {logits_shape: [4001, 128], num_topk: 6, num_topk_groups: 0, num_groups: 0, scoring_func: sigmoid, dtypes: [float32], label: "no-group-sigmoid"}
+  - {logits_shape: [4001, 128], num_topk: 6, num_topk_groups: 0, num_groups: 0, scoring_func: softmax, dtypes: [float32], label: "no-group-softmax"}
+  - {logits_shape: [4001, 128], num_topk: 6, num_topk_groups: 0, num_groups: 0, scoring_func: sqrtsoftplus, dtypes: [float32], label: "no-group-sqrtsoftplus"}
+  - {logits_shape: [4001, 256], num_topk: 8, num_topk_groups: 4, num_groups: 8, scoring_func: sigmoid, dtypes: [float32], label: "grouped-top2-sum"}
+  - {logits_shape: [8001, 256], num_topk: 8, num_topk_groups: 8, num_groups: 8, use_shared_as_routed: true, num_shared_experts: 2, scoring_func: sigmoid, dtypes: [float32], label: "shared-experts"}
+
+  roofline:
+    vars:
+      T: "logits_shape[0]"
+      E: "logits_shape[1]"
+      K: "num_topk"
+      S: "num_shared_experts if use_shared_as_routed else 0"
+    # Routing is dominated by scoring, compare/shuffle reductions, and
+    # metadata writes rather than GEMM FLOPs. This first-order estimate is
+    # refined with C500 benchmark and mcProfiler evidence in PR B.
+    flops: "T * E * 8 + T * K * 4"
+    bytes: "T * E * 4 + E * 4 + T * (K + S) * 8 + T * (K + S) * 4"
+
+  source:
+    # Planned PR B locations; path existence is deferred while this entry is spec-only.
+    kernel: tileops/kernels/moe/top2_sum_gate.py
+    op: tileops/ops/moe/top2_sum_gate.py
+    test: tests/ops/test_moe_top2_sum_gate.py
+    bench: benchmarks/ops/bench_moe_top2_sum_gate.py
+
 MoeGetFusedMappingOp:
   ref_api: "none"
   family: moe
