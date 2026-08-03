@@ -195,3 +195,48 @@ QuantPerChannelCastFusedRescaleOp:
     test: tests/ops/test_per_channel_cast_fused.py
     bench: benchmarks/ops/bench_per_channel_cast_fused.py
     bench_manifest_driven: false
+
+QuantPerChannelCastFusedExpandOp:
+  variant_of: QuantPerChannelCastFusedOp
+  ref_api: "none"
+  family: quantization
+  status: spec-only
+
+  signature:
+    inputs:
+      x: {dtype: "bfloat16 | float32", shape: "[num_tokens, hidden]"}
+      pos_to_token: {dtype: "int32", shape: "[num_tokens_out]"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
+      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens_out, num_per_tokens), hidden]"}
+    params:
+      fmt: {type: str, default: "e4m3"}
+      num_per_tokens: {type: int, default: 128}
+      round_sf: {type: bool, default: false}
+    shape_rules:
+    - "x.ndim == 2 and x.is_contiguous()"
+    - "num_per_tokens == 128"
+    - "num_tokens_out == pos_to_token.shape[0]"
+    - "num_tokens_out % 16 == 0"
+    # Gather/expand variant: tokens gathered via pos_to_token index,
+    # then per-channel amax over gathered tokens, clamp/sf/cast as base variant.
+    # out is [num_tokens_out, hidden] (expanded), out_sf is [ceildiv(num_tokens_out, 128), hidden].
+
+  workloads:
+  - {num_tokens: 512, hidden: 4096, num_tokens_out: 1024, in_dtype: bfloat16, dtypes: [bfloat16], label: "gather-bf16"}
+  - {num_tokens: 1024, hidden: 4096, num_tokens_out: 2048, in_dtype: bfloat16, dtypes: [bfloat16], label: "gather-medium-bf16"}
+
+  roofline:
+    flops: "2 * num_tokens_out * hidden"
+    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens_out * 4 + num_tokens_out * hidden + (num_tokens_out + num_per_tokens - 1) // num_per_tokens * hidden * 4"
+    vars:
+      in_dtype_bytes: "x.dtype.bytes"
+
+  source:
+    kernel: tileops/kernels/quant/per_channel_cast_fused.py
+    kernel_map:
+      per_channel_cast_fused_kernel: PerChannelCastFusedKernel
+    op: tileops/ops/quant/per_channel_cast_fused.py
+    test: tests/ops/test_per_channel_cast_fused.py
+    bench: benchmarks/ops/bench_per_channel_cast_fused.py
+    bench_manifest_driven: false
