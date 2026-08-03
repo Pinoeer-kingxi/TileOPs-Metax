@@ -95,3 +95,44 @@ QuantSwiGLUFwdChannelCastTransposeOp:
     test: tests/ops/test_quant_swiglu_channel_cast_transpose.py
     bench: benchmarks/ops/bench_quant_swiglu_channel_cast_transpose.py
     bench_manifest_driven: false
+
+QuantPerChannelCastFusedOp:
+  ref_api: "none"
+  family: quantization
+  status: spec-only
+
+  signature:
+    inputs:
+      x: {dtype: "bfloat16 | float32", shape: "[num_tokens, hidden]"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
+      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens, num_per_tokens), hidden]"}
+    params:
+      fmt: {type: str, default: "e4m3"}
+      num_per_tokens: {type: int, default: 128}
+      round_sf: {type: bool, default: false}
+    shape_rules:
+    - "x.ndim == 2 and x.is_contiguous()"
+    - "num_per_tokens == 128"
+    - "num_tokens % num_per_tokens == 0"
+
+  workloads:
+  - {num_tokens: 128, hidden: 1024, in_dtype: bfloat16, dtypes: [bfloat16], label: "small-bf16"}
+  - {num_tokens: 1024, hidden: 4096, in_dtype: bfloat16, dtypes: [bfloat16], label: "medium-bf16"}
+  - {num_tokens: 4096, hidden: 8192, in_dtype: bfloat16, dtypes: [bfloat16], label: "large-bf16"}
+  - {num_tokens: 512, hidden: 4096, in_dtype: float32, dtypes: [float32], label: "medium-fp32"}
+
+  roofline:
+    flops: "2 * num_tokens * hidden"
+    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens * hidden + ceildiv(num_tokens, num_per_tokens) * hidden * 4"
+    vars:
+      in_dtype_bytes: "x.dtype.bytes"
+
+  source:
+    kernel: tileops/kernels/quant/per_channel_cast_fused.py
+    kernel_map:
+      per_channel_cast_fused_kernel: PerChannelCastFusedKernel
+    op: tileops/ops/quant/per_channel_cast_fused.py
+    test: tests/ops/test_per_channel_cast_fused.py
+    bench: benchmarks/ops/bench_per_channel_cast_fused.py
+    bench_manifest_driven: false
