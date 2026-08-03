@@ -133,9 +133,59 @@ QuantPerChannelCastFusedOp:
 
   roofline:
     flops: "2 * num_tokens * hidden"
-    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens * hidden + ceildiv(num_tokens, num_per_tokens) * hidden * 4"
+    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens * hidden + (num_tokens + num_per_tokens - 1) // num_per_tokens * hidden * 4"
     vars:
       in_dtype_bytes: "x.dtype.bytes"
+
+  source:
+    kernel: tileops/kernels/quant/per_channel_cast_fused.py
+    kernel_map:
+      per_channel_cast_fused_kernel: PerChannelCastFusedKernel
+    op: tileops/ops/quant/per_channel_cast_fused.py
+    test: tests/ops/test_per_channel_cast_fused.py
+    bench: benchmarks/ops/bench_per_channel_cast_fused.py
+    bench_manifest_driven: false
+
+
+QuantPerChannelCastFusedRescaleOp:
+  variant_of: QuantPerChannelCastFusedOp
+  ref_api: "none"
+  family: quantization
+  status: spec-only
+
+  signature:
+    inputs:
+      x: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
+      x_sf_invs: {dtype: "float32", shape: "[num_tokens, ceildiv(hidden, num_per_channels)]"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
+      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens, num_per_tokens), hidden]"}
+    params:
+      fmt: {type: str, default: "e4m3"}
+      num_per_tokens: {type: int, default: 128}
+      num_per_channels: {type: int, default: 128}
+      round_sf: {type: bool, default: false}
+    shape_rules:
+    - "x.ndim == 2 and x.is_contiguous()"
+    - "num_per_tokens == 128"
+    - "num_per_channels == 128"
+    - "num_tokens % num_per_tokens == 0"
+    - "x_sf_invs.shape[0] == num_tokens"
+    - "x_sf_invs.shape[1] == (hidden + num_per_channels - 1) // num_per_channels"
+    # Scale factor semantics (rescale variant, per-channel, e4m3):
+    #   amax[b, h] = max(abs(x[b*128:(b+1)*128, h] * x_sf_invs[b, h//128]))   # rescale first
+    #   clamped_amax = max(amax, 1e-4)
+    #   raw_sf = clamped_amax / 448.0
+    #   round_sf=false: out_sf = raw_sf; round_sf=true: rounded up to power of two
+    #   out = cast_float8_e4m3fn(x * x_sf_invs / expanded_out_sf)
+
+  workloads:
+  - {num_tokens: 128, hidden: 1024, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "small-fp8-rescale"}
+  - {num_tokens: 1024, hidden: 4096, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "medium-fp8-rescale"}
+
+  roofline:
+    flops: "3 * num_tokens * hidden"
+    bytes: "num_tokens * hidden + num_tokens * (hidden + num_per_channels - 1) // num_per_channels * 4 + num_tokens * hidden + (num_tokens + num_per_tokens - 1) // num_per_tokens * hidden * 4"
 
   source:
     kernel: tileops/kernels/quant/per_channel_cast_fused.py
