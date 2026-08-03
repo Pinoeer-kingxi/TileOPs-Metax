@@ -632,3 +632,44 @@ TopKGateFwdOp:
     op: tileops/ops/moe/topk_gate.py
     test: tests/ops/test_moe_topk_gate.py
     bench: benchmarks/ops/bench_moe_topk_gate.py
+
+MoeTopKSumGroupIdxFwdOp:
+  ref_api: "none"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      scores: {dtype: "float32", shape: "[num_tokens, num_groups, num_experts_per_group]"}
+    outputs:
+      # Group ranking is stable: equal group scores prefer the smaller group index.
+      group_topk_idx: {dtype: "int64", shape: "[num_tokens, num_topk_groups]"}
+    params:
+      num_topk_sum: {type: int}
+      num_topk_groups: {type: int}
+    shape_rules:
+    - "num_tokens >= 0"
+    - "1 <= num_groups <= 32"
+    - "num_experts_per_group > 0"
+    - "num_topk_sum in (1, 2)"
+    - "num_topk_sum <= num_experts_per_group"
+    - "0 < num_topk_groups <= num_groups"
+
+  workloads:
+  - {num_tokens: 1, num_groups: 8, num_experts_per_group: 32, num_topk_sum: 2, num_topk_groups: 4, dtypes: [float32], label: "deepseek-v3-single-token-routing"}
+  - {num_tokens: 512, num_groups: 8, num_experts_per_group: 32, num_topk_sum: 2, num_topk_groups: 4, dtypes: [float32], label: "deepseek-v3-decode-routing"}
+  - {num_tokens: 4096, num_groups: 8, num_experts_per_group: 32, num_topk_sum: 2, num_topk_groups: 4, dtypes: [float32], label: "deepseek-v3-prefill-routing"}
+  - {num_tokens: 32, num_groups: 12, num_experts_per_group: 6, num_topk_sum: 1, num_topk_groups: 2, dtypes: [float32], label: "non-power-of-two-group-width"}
+
+  roofline:
+    # Per token: expert-score comparisons, stable inter-group ranking, and optional top-2 sums.
+    flops: "num_tokens * (num_groups * num_experts_per_group + num_groups * num_groups + (num_topk_sum - 1) * num_groups)"
+    # Read float32 scores once and write int64 selected group indices.
+    bytes: "num_tokens * num_groups * num_experts_per_group * elem_bytes + num_tokens * num_topk_groups * 8"
+
+  source:
+    # Source paths become required when this entry transitions to implemented.
+    kernel: tileops/kernels/moe/topk_sum_group_idx.py
+    op: tileops/ops/moe/topk_sum_group_idx.py
+    test: tests/ops/test_moe_topk_sum_group_idx.py
+    bench: benchmarks/ops/bench_moe_topk_sum_group_idx.py
