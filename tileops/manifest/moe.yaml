@@ -523,3 +523,43 @@ MoeTop2SumGateFwdOp:
     op: tileops/ops/moe/top2_sum_gate.py
     test: tests/ops/test_moe_top2_sum_gate.py
     bench: benchmarks/ops/bench_moe_top2_sum_gate.py
+
+TopKGateFwdOp:
+  # Stable MoE expert selection. For equal scores, the lower expert index wins.
+  ref_api: "none"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      scores: {dtype: "float32", shape: "[num_tokens, num_experts]"}
+    outputs:
+      topk_idx: {dtype: "int64", shape: "[num_tokens, num_topk]"}
+    params:
+      num_topk: {type: int, kw_only: true}
+    shape_rules:
+    - "scores.ndim == 2"
+    - "scores.shape[1] > 0"
+    - "0 < num_topk <= scores.shape[1]"
+    - "topk_idx.shape == (scores.shape[0], num_topk)"
+
+  workloads:
+    # DeepSeek-V3: E=256, K=8
+  - {num_tokens: 512, num_experts: 256, num_topk: 8, dtypes: [float32], label: "deepseek-v3-decode-routing"}
+  - {num_tokens: 4096, num_experts: 256, num_topk: 8, dtypes: [float32], label: "deepseek-v3-prefill-routing"}
+    # Qwen3-235B-A22B: E=128, K=8
+  - {num_tokens: 512, num_experts: 128, num_topk: 8, dtypes: [float32], label: "qwen3-235b-decode-routing"}
+  - {num_tokens: 4096, num_experts: 128, num_topk: 8, dtypes: [float32], label: "qwen3-235b-prefill-routing"}
+
+  roofline:
+    # Repeated stable argmax selection: one comparison pass per selected expert.
+    flops: "num_tokens * num_topk * num_experts"
+    # Read FP32 scores once and write INT64 expert indices.
+    bytes: "num_tokens * num_experts * elem_bytes + num_tokens * num_topk * 8"
+
+  source:
+    # Planned PR B locations; path existence is deferred while this entry is spec-only.
+    kernel: tileops/kernels/moe/topk_gate.py
+    op: tileops/ops/moe/topk_gate.py
+    test: tests/ops/test_moe_topk_gate.py
+    bench: benchmarks/ops/bench_moe_topk_gate.py
