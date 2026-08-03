@@ -96,6 +96,8 @@ QuantSwiGLUFwdChannelCastTransposeOp:
     bench: benchmarks/ops/bench_quant_swiglu_channel_cast_transpose.py
     bench_manifest_driven: false
 
+
+
 QuantPerChannelCastFusedOp:
   ref_api: "none"
   family: quantization
@@ -115,6 +117,13 @@ QuantPerChannelCastFusedOp:
     - "x.ndim == 2 and x.is_contiguous()"
     - "num_per_tokens == 128"
     - "num_tokens % num_per_tokens == 0"
+    # Scale factor semantics (per-channel, e4m3):
+    #   amax[b, h] = max(abs(x[b*128:(b+1)*128, h]))   for token block b, channel h
+    #   clamped_amax = max(amax, 1e-4)                  # e4m3 clamp_min_value
+    #   raw_sf = clamped_amax / 448.0                   # e4m3 max_value = 448
+    #   round_sf=false: out_sf = raw_sf
+    #   round_sf=true:  out_sf = raw_sf rounded up to nearest power of two
+    #   out = cast_float8_e4m3fn(x / expanded_out_sf)  # sf expand (num_blocks, hidden) -> (num_tokens, hidden)
 
   workloads:
   - {num_tokens: 128, hidden: 1024, in_dtype: bfloat16, dtypes: [bfloat16], label: "small-bf16"}
