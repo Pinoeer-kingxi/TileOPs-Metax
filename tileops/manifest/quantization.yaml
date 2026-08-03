@@ -108,34 +108,34 @@ QuantPerChannelCastFusedOp:
       x: {dtype: "bfloat16 | float32", shape: "[num_tokens, hidden]"}
     outputs:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
-      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens, num_per_tokens), hidden]"}
+      out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
       fmt: {type: str, default: "e4m3"}
       num_per_tokens: {type: int, default: 128}
       round_sf: {type: bool, default: false}
     shape_rules:
-    - "x.ndim == 2 and x.is_contiguous()"
+    - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
     - "num_tokens % num_per_tokens == 0"
-    # Scale factor semantics (per-channel, e4m3):
-    #   amax[b, h] = max(abs(x[b*128:(b+1)*128, h]))   for token block b, channel h
-    #   clamped_amax = max(amax, 1e-4)                  # e4m3 clamp_min_value
-    #   raw_sf = clamped_amax / 448.0                   # e4m3 max_value = 448
-    #   round_sf=false: out_sf = raw_sf
-    #   round_sf=true:  out_sf = raw_sf rounded up to nearest power of two
-    #   out = cast_float8_e4m3fn(x / expanded_out_sf)  # sf expand (num_blocks, hidden) -> (num_tokens, hidden)
+    - "hidden > 0 and hidden % 128 == 0"
+    - "sf_rows == (num_tokens + num_per_tokens - 1) // num_per_tokens"
+    # For output block b and channel h, out_sf[b, h] is derived from
+    # max(abs(x[t, h])) over t in that 128-token block, clamped to at least
+    # 1e-4 and divided by the e4m3 maximum 448. With round_sf=true it is
+    # rounded up to the nearest power of two. out stores x / out_sf in e4m3.
 
   workloads:
-  - {num_tokens: 128, hidden: 1024, in_dtype: bfloat16, dtypes: [bfloat16], label: "small-bf16"}
-  - {num_tokens: 1024, hidden: 4096, in_dtype: bfloat16, dtypes: [bfloat16], label: "medium-bf16"}
-  - {num_tokens: 4096, hidden: 8192, in_dtype: bfloat16, dtypes: [bfloat16], label: "large-bf16"}
-  - {num_tokens: 512, hidden: 4096, in_dtype: float32, dtypes: [float32], label: "medium-fp32"}
+  - {x_shape: [128, 1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-bf16"}
+  - {x_shape: [1024, 4096], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "medium-rounded-bf16"}
+  - {x_shape: [4096, 8192], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "large-fp32"}
 
   roofline:
-    flops: "2 * num_tokens * hidden"
-    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens * hidden + (num_tokens + num_per_tokens - 1) // num_per_tokens * hidden * 4"
     vars:
-      in_dtype_bytes: "x.dtype.bytes"
+      num_tokens: "x.shape[0]"
+      hidden: "x.shape[1]"
+      sf_rows: "(num_tokens + num_per_tokens - 1) // num_per_tokens"
+    flops: "3 * num_tokens * hidden + 2 * sf_rows * hidden"
+    bytes: "num_tokens * hidden * elem_bytes + num_tokens * hidden + sf_rows * hidden * 4"
 
   source:
     kernel: tileops/kernels/quant/per_channel_cast_fused.py
@@ -144,63 +144,13 @@ QuantPerChannelCastFusedOp:
     op: tileops/ops/quant/per_channel_cast_fused.py
     test: tests/ops/test_per_channel_cast_fused.py
     bench: benchmarks/ops/bench_per_channel_cast_fused.py
-    bench_manifest_driven: false
-
-
-QuantPerChannelCastFusedRescaleOp:
-  variant_of: QuantPerChannelCastFusedOp
-  ref_api: "none"
-  family: quantization
-  status: spec-only
-
-  signature:
-    inputs:
-      x: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
-      x_sf_invs: {dtype: "float32", shape: "[num_tokens, ceildiv(hidden, num_per_channels)]"}
-    outputs:
-      out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
-      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens, num_per_tokens), hidden]"}
-    params:
-      fmt: {type: str, default: "e4m3"}
-      num_per_tokens: {type: int, default: 128}
-      num_per_channels: {type: int, default: 128}
-      round_sf: {type: bool, default: false}
-    shape_rules:
-    - "x.ndim == 2 and x.is_contiguous()"
-    - "num_per_tokens == 128"
-    - "num_per_channels == 128"
-    - "num_tokens % num_per_tokens == 0"
-    - "x_sf_invs.shape[0] == num_tokens"
-    - "x_sf_invs.shape[1] == (hidden + num_per_channels - 1) // num_per_channels"
-    # Scale factor semantics (rescale variant, per-channel, e4m3):
-    #   amax[b, h] = max(abs(x[b*128:(b+1)*128, h] * x_sf_invs[b, h//128]))   # rescale first
-    #   clamped_amax = max(amax, 1e-4)
-    #   raw_sf = clamped_amax / 448.0
-    #   round_sf=false: out_sf = raw_sf; round_sf=true: rounded up to power of two
-    #   out = cast_float8_e4m3fn(x * x_sf_invs / expanded_out_sf)
-
-  workloads:
-  - {num_tokens: 128, hidden: 1024, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "small-fp8-rescale"}
-  - {num_tokens: 1024, hidden: 4096, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "medium-fp8-rescale"}
-
-  roofline:
-    flops: "3 * num_tokens * hidden"
-    bytes: "num_tokens * hidden + num_tokens * (hidden + num_per_channels - 1) // num_per_channels * 4 + num_tokens * hidden + (num_tokens + num_per_tokens - 1) // num_per_tokens * hidden * 4"
-
-  source:
-    kernel: tileops/kernels/quant/per_channel_cast_fused.py
-    kernel_map:
-      per_channel_cast_fused_kernel: PerChannelCastFusedKernel
-    op: tileops/ops/quant/per_channel_cast_fused.py
-    test: tests/ops/test_per_channel_cast_fused.py
-    bench: benchmarks/ops/bench_per_channel_cast_fused.py
-    bench_manifest_driven: false
+    bench_manifest_driven: true
 
 QuantPerChannelCastFusedExpandOp:
-  variant_of: QuantPerChannelCastFusedOp
   ref_api: "none"
   family: quantization
   status: spec-only
+  variant_of: QuantPerChannelCastFusedOp
 
   signature:
     inputs:
@@ -208,29 +158,32 @@ QuantPerChannelCastFusedExpandOp:
       pos_to_token: {dtype: "int32", shape: "[num_tokens_out]"}
     outputs:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
-      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens_out, num_per_tokens), hidden]"}
+      out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
       fmt: {type: str, default: "e4m3"}
       num_per_tokens: {type: int, default: 128}
       round_sf: {type: bool, default: false}
     shape_rules:
-    - "x.ndim == 2 and x.is_contiguous()"
+    - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
-    - "num_tokens_out == pos_to_token.shape[0]"
     - "num_tokens_out % 16 == 0"
-    # Gather/expand variant: tokens gathered via pos_to_token index,
-    # then per-channel amax over gathered tokens, clamp/sf/cast as base variant.
-    # out is [num_tokens_out, hidden] (expanded), out_sf is [ceildiv(num_tokens_out, 128), hidden].
+    - "hidden > 0 and hidden % 128 == 0"
+    - "sf_rows == (num_tokens_out + num_per_tokens - 1) // num_per_tokens"
+    # Each non-negative pos_to_token entry indexes a row of x and must be less
+    # than num_tokens. A negative entry is a padding sentinel and produces a
+    # zero row before per-channel scaling.
 
   workloads:
-  - {num_tokens: 512, hidden: 4096, num_tokens_out: 1024, in_dtype: bfloat16, dtypes: [bfloat16], label: "gather-bf16"}
-  - {num_tokens: 1024, hidden: 4096, num_tokens_out: 2048, in_dtype: bfloat16, dtypes: [bfloat16], label: "gather-medium-bf16"}
+  - {x_shape: [512, 4096], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "gather-bf16"}
+  - {x_shape: [1024, 4096], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "gather-rounded-fp32"}
 
   roofline:
-    flops: "2 * num_tokens_out * hidden"
-    bytes: "num_tokens * hidden * in_dtype_bytes + num_tokens_out * 4 + num_tokens_out * hidden + (num_tokens_out + num_per_tokens - 1) // num_per_tokens * hidden * 4"
     vars:
-      in_dtype_bytes: "x.dtype.bytes"
+      num_tokens_out: "pos_to_token.shape[0]"
+      hidden: "x.shape[1]"
+      sf_rows: "(num_tokens_out + num_per_tokens - 1) // num_per_tokens"
+    flops: "3 * num_tokens_out * hidden + 2 * sf_rows * hidden"
+    bytes: "num_tokens_out * hidden * elem_bytes + num_tokens_out * 4 + num_tokens_out * hidden + sf_rows * hidden * 4"
 
   source:
     kernel: tileops/kernels/quant/per_channel_cast_fused.py
@@ -239,46 +192,50 @@ QuantPerChannelCastFusedExpandOp:
     op: tileops/ops/quant/per_channel_cast_fused.py
     test: tests/ops/test_per_channel_cast_fused.py
     bench: benchmarks/ops/bench_per_channel_cast_fused.py
-    bench_manifest_driven: false
+    bench_manifest_driven: true
 
-
-QuantPerChannelCastFusedRescaleExpandOp:
-  variant_of: QuantPerChannelCastFusedOp
+QuantPerChannelCastFusedRescaleOp:
   ref_api: "none"
   family: quantization
   status: spec-only
+  variant_of: QuantPerChannelCastFusedOp
 
   signature:
     inputs:
       x: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
-      x_sf_invs: {dtype: "float32", shape: "[num_tokens, ceildiv(hidden, num_per_channels)]"}
-      pos_to_token: {dtype: "int32", shape: "[num_tokens_out]"}
+      x_sf_invs: {dtype: "float32", shape: "[num_tokens, sf_cols]"}
     outputs:
-      out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
-      out_sf: {dtype: "float32", shape: "[ceildiv(num_tokens_out, num_per_tokens), hidden]"}
+      out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
+      out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
       fmt: {type: str, default: "e4m3"}
       num_per_tokens: {type: int, default: 128}
       num_per_channels: {type: int, default: 128}
       round_sf: {type: bool, default: false}
     shape_rules:
-    - "x.ndim == 2 and x.is_contiguous()"
+    - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
     - "num_per_channels == 128"
-    - "num_tokens_out == pos_to_token.shape[0]"
-    - "num_tokens_out % 16 == 0"
-    - "x_sf_invs.shape[0] == num_tokens"
-    - "x_sf_invs.shape[1] == (hidden + num_per_channels - 1) // num_per_channels"
-    # Rescale+expand variant: gather tokens via pos_to_token, rescale via x_sf_invs,
-    # then per-channel amax over gathered+rescaled tokens, clamp/sf/cast.
+    - "num_tokens % num_per_tokens == 0"
+    - "hidden > 0 and hidden % 256 == 0"
+    - "sf_cols * num_per_channels == hidden"
+    - "sf_rows == (num_tokens + num_per_tokens - 1) // num_per_tokens"
+    # x_sf_invs is the per-token, per-128-channel dequantization scale. The
+    # logical input used for amax and requantization is
+    # x[t, h] * x_sf_invs[t, h // num_per_channels].
 
   workloads:
-  - {num_tokens: 512, hidden: 4096, num_tokens_out: 1024, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8-small"}
-  - {num_tokens: 1024, hidden: 4096, num_tokens_out: 2048, in_dtype: float8_e4m3fn, num_per_channels: 128, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8-medium"}
+  - {x_shape: [128, 1024], x_sf_invs_shape: [128, 8], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "small-fp8-rescale"}
+  - {x_shape: [1024, 4096], x_sf_invs_shape: [1024, 32], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-fp8-rescale-rounded"}
 
   roofline:
-    flops: "3 * num_tokens_out * hidden"
-    bytes: "num_tokens * hidden + num_tokens * (hidden + num_per_channels - 1) // num_per_channels * 4 + num_tokens_out * 4 + num_tokens_out * hidden + (num_tokens_out + num_per_tokens - 1) // num_per_tokens * hidden * 4"
+    vars:
+      num_tokens: "x.shape[0]"
+      hidden: "x.shape[1]"
+      sf_cols: "x_sf_invs.shape[1]"
+      sf_rows: "(num_tokens + num_per_tokens - 1) // num_per_tokens"
+    flops: "5 * num_tokens * hidden + 2 * sf_rows * hidden"
+    bytes: "2 * num_tokens * hidden + num_tokens * sf_cols * 4 + sf_rows * hidden * 4"
 
   source:
     kernel: tileops/kernels/quant/per_channel_cast_fused.py
@@ -287,4 +244,58 @@ QuantPerChannelCastFusedRescaleExpandOp:
     op: tileops/ops/quant/per_channel_cast_fused.py
     test: tests/ops/test_per_channel_cast_fused.py
     bench: benchmarks/ops/bench_per_channel_cast_fused.py
-    bench_manifest_driven: false
+    bench_manifest_driven: true
+
+QuantPerChannelCastFusedRescaleExpandOp:
+  ref_api: "none"
+  family: quantization
+  status: spec-only
+  variant_of: QuantPerChannelCastFusedOp
+
+  signature:
+    inputs:
+      x: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
+      x_sf_invs: {dtype: "float32", shape: "[num_tokens, sf_cols]"}
+      pos_to_token: {dtype: "int32", shape: "[num_tokens_out]"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
+      out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
+    params:
+      fmt: {type: str, default: "e4m3"}
+      num_per_tokens: {type: int, default: 128}
+      num_per_channels: {type: int, default: 128}
+      round_sf: {type: bool, default: false}
+    shape_rules:
+    - "fmt == 'e4m3'"
+    - "num_per_tokens == 128"
+    - "num_per_channels == 128"
+    - "num_tokens_out % 16 == 0"
+    - "hidden > 0 and hidden % 256 == 0"
+    - "sf_cols * num_per_channels == hidden"
+    - "sf_rows == (num_tokens_out + num_per_tokens - 1) // num_per_tokens"
+    # For each valid output token t_out, source token t is
+    # pos_to_token[t_out]. The logical input is
+    # x[t, h] * x_sf_invs[t, h // num_per_channels]. Negative positions are
+    # padding sentinels and contribute zeros.
+
+  workloads:
+  - {x_shape: [512, 4096], x_sf_invs_shape: [512, 32], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8"}
+  - {x_shape: [1024, 4096], x_sf_invs_shape: [1024, 32], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8-rounded"}
+
+  roofline:
+    vars:
+      num_tokens_out: "pos_to_token.shape[0]"
+      hidden: "x.shape[1]"
+      sf_cols: "x_sf_invs.shape[1]"
+      sf_rows: "(num_tokens_out + num_per_tokens - 1) // num_per_tokens"
+    flops: "5 * num_tokens_out * hidden + 2 * sf_rows * hidden"
+    bytes: "2 * num_tokens_out * hidden + num_tokens_out * sf_cols * 4 + num_tokens_out * 4 + sf_rows * hidden * 4"
+
+  source:
+    kernel: tileops/kernels/quant/per_channel_cast_fused.py
+    kernel_map:
+      per_channel_cast_fused_kernel: PerChannelCastFusedKernel
+    op: tileops/ops/quant/per_channel_cast_fused.py
+    test: tests/ops/test_per_channel_cast_fused.py
+    bench: benchmarks/ops/bench_per_channel_cast_fused.py
+    bench_manifest_driven: true
