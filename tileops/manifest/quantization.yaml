@@ -59,7 +59,7 @@ QuantSwiGLUFwdChannelCastTransposeOp:
     shape_rules:
     - "x.ndim == 2"
     - "x.shape[0] % 128 == 0"
-    - "x.shape[1] % 256 == 0"
+    - "x.shape[1] % 128 == 0"
     - "num_per_tokens in (32, 128)"
     - "fmt == 'e4m3'"
     - "out.shape == (x.shape[0], x.shape[1] // 2) if without_transpose else out.shape == (x.shape[1] // 2, x.shape[0])"
@@ -67,6 +67,7 @@ QuantSwiGLUFwdChannelCastTransposeOp:
 
   workloads:
   - {x_shape: [4096, 4096], fmt: e4m3, num_per_tokens: 128, dtypes: [bfloat16], label: "t4096-h2048-nt128"}
+  - {x_shape: [4096, 1152], fmt: e4m3, num_per_tokens: 128, dtypes: [bfloat16], label: "t4096-h576-nt128"}
   - {x_shape: [8064, 8192], fmt: e4m3, num_per_tokens: 128, without_transpose: true, dtypes: [bfloat16], label: "t8064-h4096-nt128-transpose"}
   - {x_shape: [4096, 14336], fmt: e4m3, num_per_tokens: 32, swiglu_clamp_value: 0.5, dtypes: [bfloat16], label: "t4096-h7168-nt32-clamp"}
   - {x_shape: [8064, 12288], fmt: e4m3, num_per_tokens: 32, without_transpose: true, round_sf: true, swiglu_clamp_value: 0.5, dtypes: [bfloat16], label: "t8064-h6144-nt32-transpose-round-clamp"}
