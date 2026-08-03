@@ -71,9 +71,11 @@ QuantSwiGLUFwdChannelCastTransposeOp:
     vars:
       num_tokens: "x.shape[0]"
       two_hidden: "x.shape[1]"
-    # SwiGLU: silu(gate)*value = 6 FLOPs/output (see SiluAndMulFwdOp); per-channel
-    # absmax + scale-mul + FP8 cast adds ~3.
-    flops: "9 * num_tokens * (two_hidden // 2)"
+    # Per output element: SwiGLU silu(gate)*value = 6 (see SiluAndMulFwdOp), plus
+    # per-channel absmax (abs+max = 2) and scale-mul (1) = 9. Per scale block,
+    # get_sf_and_inv = clamp-max + sf div + sf_inv div = 3 (round_sf=True adds
+    # exponent bit-manipulation); blocks = num_tokens/num_per_tokens * hidden.
+    flops: "9 * num_tokens * (two_hidden // 2) + 3 * (num_tokens // num_per_tokens) * (two_hidden // 2)"
     # Read x (2*hidden elem/row), write FP8 out (1 B/elem) + fp32 per-block sf.
     bytes: "num_tokens * two_hidden * elem_bytes + num_tokens * (two_hidden // 2) + (num_tokens // num_per_tokens) * (two_hidden // 2) * 4"
 
