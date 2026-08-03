@@ -524,6 +524,75 @@ MoeTop2SumGateFwdOp:
     test: tests/ops/test_moe_top2_sum_gate.py
     bench: benchmarks/ops/bench_moe_top2_sum_gate.py
 
+MoeGetFusedMappingOp:
+  ref_api: "none"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      topk_idx: {dtype: "int64"}
+    outputs:
+      pos_to_expert: {dtype: "int32"}
+      pos_to_token: {dtype: "int32"}
+      pos_to_token_topk: {dtype: "int32"}
+      token_topk_to_pos: {dtype: "int32"}
+      expert_start: {dtype: "int32"}
+      expert_end: {dtype: "int32"}
+      num_tokens_per_expert: {dtype: "int32"}
+    params:
+      num_experts: {type: int, dtype: "int32"}
+      num_expanded_tokens: {type: int, dtype: "int32"}
+      alignment: {type: int, dtype: "int32"}
+    shape_rules:
+    - "num_experts > 0"
+    - "num_expanded_tokens >= 0"
+    - "alignment > 0"
+    - "topk_idx.ndim == 2"
+    - "topk_idx.shape[1] > 0"
+    - "0 < num_experts <= 1024"
+    - "alignment > 0"
+    - "num_expanded_tokens >= 0"
+    - "topk_idx.shape[0] == 0 or num_expanded_tokens >= ((topk_idx.shape[0] * topk_idx.shape[1] + (alignment - 1) * num_experts) // alignment) * alignment"
+    - "pos_to_expert.shape == (num_expanded_tokens,)"
+    - "pos_to_token.shape == (num_expanded_tokens,)"
+    - "pos_to_token_topk.shape == (num_expanded_tokens,)"
+    - "token_topk_to_pos.shape == topk_idx.shape"
+    - "expert_start.shape == (num_experts,)"
+    - "expert_end.shape == (num_experts,)"
+    - "num_tokens_per_expert.shape == (num_experts,)"
+
+  workloads:
+  - {
+      topk_idx: [512, 8],
+      num_experts: 256,
+      num_expanded_tokens: 20224,
+      alignment: 64,
+      dtypes: [int64],
+      label: "routing-medium-e256-a64"
+    }
+  - {
+      topk_idx: [4096, 8],
+      num_experts: 256,
+      num_expanded_tokens: 65280,
+      alignment: 128,
+      dtypes: [int64],
+      label: "routing-prefill-e256-a128"
+    }
+
+  roofline:
+    vars:
+      N: "product(topk_idx.shape)"
+    flops: "0"
+    bytes: "N * 8 + (3 * num_expanded_tokens + N + 3 * num_experts) * 4"
+
+  source:
+    # Planned PR B locations; path existence is deferred while this entry is spec-only.
+    kernel: tileops/kernels/moe/get_fused_mapping.py
+    op: tileops/ops/moe/get_fused_mapping.py
+    test: tests/ops/test_get_fused_mapping.py
+    bench: benchmarks/ops/bench_get_fused_mapping.py
+
 TopKGateFwdOp:
   # Stable MoE expert selection. For equal scores, the lower expert index wins.
   ref_api: "none"
