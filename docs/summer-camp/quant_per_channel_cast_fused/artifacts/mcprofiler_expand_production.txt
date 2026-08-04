@@ -1,0 +1,94 @@
+##############################
+Sub-module: Summary
+------------------------------
+Name: RoofLine
+Description: 
+Value: {
+    "processed_data": {
+        "all_ops": 220180224.0,
+        "all_memacs": 8567776.0,
+        "during": 57347.0,
+        "block_num": 104,
+        "vl1_memacs": 32305664.0,
+        "l2c_memacs": 7992320.0
+    },
+    "data": {
+        "all_ops": 220180224.0,
+        "all_memacs": 8567776.0,
+        "block_num": 104,
+        "during": 57347.0,
+        "core_clk": 1.125,
+        "MAX_Flops_base": 1,
+        "case_flops": 36.917668552174284,
+        "MAX_Bandwith": 1843.2,
+        "MAX_I": 260.0,
+        "case_I": 219.64652862192668,
+        "case_bandwith": 168.0776326573317,
+        "case_VL1_I": 58.25239364868824,
+        "case_L2C_I": 235.46132492320834,
+        "mc_clk": 0.9
+    },
+    "filename": "/opt/mcProfiler-ubuntu18.04/output20260804171217/RoofLine20260804171519905.png"
+}
+##############################
+Sub-module: CE Statistics
+------------------------------
+Name: WORKGROUPS
+Description: ce send workgroup
+Value: 512.0
+------------------------------
+Name: WAVES
+Description: ce send waves
+Value: 2,048.0
+------------------------------
+Name: Average Wave life cycles
+Description: average life cycles per wave from start to end
+Value: 11,427.86
+##############################
+Sub-module: Memory Statistics
+------------------------------
+Name: Global Read Instructions
+Description: Number of global read instructions in all APs
+Value: 62,440
+------------------------------
+Name: Global Write Instructions
+Description: Number of global write instructions in all APs
+Value: 64,758
+------------------------------
+Name: Private Read Instructions
+Description: Number of private read instructions in all APs
+Value: 0
+------------------------------
+Name: Private Write Instructions
+Description: Number of private write instructions in all APs
+Value: 0
+------------------------------
+Name: VL1 Hit Rate
+Description: hit rate of all instructions in all VL1s
+Value: 98.41%
+------------------------------
+Name: L2C Hit Rate
+Description: hit rate of all instructions in all L2Cs
+Value: 50.38%
+------------------------------
+Name: Global Memory Read bytes
+Description: bytes read from global memory
+Value: 4,241,824.0byte
+------------------------------
+Name: Global Memory Write bytes
+Description: bytes write from global memory
+Value: 4,325,952.0byte
+##############################
+Sub-module: Workgroup Memory
+------------------------------
+Name: load instructions
+Description: number of total workgroup memory load instructions
+Value: 4,016.0
+------------------------------
+Name: store instructions
+Description: number of total workgroup memory write instructions
+Value: 2,510.0
+------------------------------
+Name: shared memory access efficiency
+Description: Proportion of NON-CONFLICT access
+Value: 100.0%
