@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+
 from benchmarks.ops.per_channel_cast_fused_baselines import (
     TILE_K,
     UPSTREAM_COMMIT,
@@ -11,7 +12,6 @@ from benchmarks.ops.per_channel_cast_fused_baselines import (
     UPSTREAM_TORCH_REFERENCE_SHA256,
     PerChannelCastFusedTileLangBaseline,
 )
-
 from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
 
 

@@ -52,6 +52,8 @@ def _assert_quant_equal(
 
 @pytest.mark.smoke
 def test_per_channel_cast_fused_c500_shared_memory_budget() -> None:
+    assert _shared_memory_bytes(64, torch.float32, register_staging=True) == 1_024
+    assert _shared_memory_bytes(64, torch.bfloat16, register_staging=True) == 1_024
     assert _shared_memory_bytes(64, torch.float32) == 33_792
     assert _shared_memory_bytes(128, torch.float32) == 67_584
     assert _shared_memory_bytes(128, torch.bfloat16) == 34_816
@@ -67,6 +69,7 @@ def test_per_channel_cast_fused_c500_shared_memory_budget() -> None:
         pytest.param((128, 128), torch.float32, False, marks=pytest.mark.smoke),
         pytest.param((256, 384), torch.bfloat16, True, marks=pytest.mark.full),
         pytest.param((256, 384), torch.float32, True, marks=pytest.mark.full),
+        pytest.param((1024, 7168), torch.bfloat16, True, marks=pytest.mark.full),
     ],
 )
 def test_per_channel_cast_fused_plain(
@@ -76,12 +79,20 @@ def test_per_channel_cast_fused_plain(
     op = QuantPerChannelCastFusedOp(round_sf=round_sf)
     _assert_quant_equal(op(x), per_channel_cast_fused_reference(x, round_sf=round_sf))
     assert op.kernel.tile_k == 64
+    assert op.kernel.register_staging is True
     assert op.kernel.shared_memory_bytes <= _C500_SHARED_MEMORY_LIMIT_BYTES
 
 
-@pytest.mark.smoke
-def test_per_channel_cast_fused_zero_input_uses_minimum_scale() -> None:
-    x = torch.zeros((128, 128), device="cuda", dtype=torch.bfloat16)
+@pytest.mark.parametrize(
+    "magnitude",
+    [
+        pytest.param(0.0, marks=pytest.mark.smoke, id="zero"),
+        pytest.param(1e-8, marks=pytest.mark.full, id="below-amax-floor"),
+    ],
+)
+def test_per_channel_cast_fused_minimum_scale(magnitude: float) -> None:
+    x = torch.full((128, 128), magnitude, device="cuda", dtype=torch.bfloat16)
+    x[:, 1::2].neg_()
     actual = QuantPerChannelCastFusedOp()(x)
     expected = per_channel_cast_fused_reference(x)
     _assert_quant_equal(actual, expected)
@@ -105,18 +116,23 @@ def test_per_channel_cast_fused_signed_extremes() -> None:
 
 
 @pytest.mark.parametrize(
-    "num_tokens_out, position_case",
+    "x_shape, dtype, num_tokens_out, position_case, round_sf",
     [
-        pytest.param(16, "mixed", marks=pytest.mark.smoke),
-        pytest.param(128, "repeated", marks=pytest.mark.full),
-        pytest.param(144, "all_padding", marks=pytest.mark.full),
-        pytest.param(256, "reverse", marks=pytest.mark.full),
+        pytest.param((64, 128), torch.bfloat16, 16, "mixed", False, marks=pytest.mark.smoke),
+        pytest.param((153, 128), torch.float32, 160, "mixed", True, marks=pytest.mark.smoke),
+        pytest.param((64, 128), torch.bfloat16, 128, "repeated", False, marks=pytest.mark.full),
+        pytest.param((64, 128), torch.bfloat16, 144, "all_padding", False, marks=pytest.mark.full),
+        pytest.param((64, 128), torch.bfloat16, 256, "reverse", False, marks=pytest.mark.full),
     ],
 )
 def test_per_channel_cast_fused_expand_output_sizes(
-    num_tokens_out: int, position_case: str
+    x_shape: tuple[int, int],
+    dtype: torch.dtype,
+    num_tokens_out: int,
+    position_case: str,
+    round_sf: bool,
 ) -> None:
-    x = torch.randn((64, 128), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(x_shape, device="cuda", dtype=dtype)
     if position_case == "repeated":
         pos_to_token = torch.full((num_tokens_out,), 7, device="cuda", dtype=torch.int32)
         pos_to_token[::9] = -1
@@ -129,12 +145,17 @@ def test_per_channel_cast_fused_expand_output_sizes(
     else:
         pos_to_token = _make_positions(x.shape[0], num_tokens_out)
 
-    op = QuantPerChannelCastFusedExpandOp()
+    op = QuantPerChannelCastFusedExpandOp(round_sf=round_sf)
     _assert_quant_equal(
         op(x, pos_to_token),
-        per_channel_cast_fused_reference(x, pos_to_token=pos_to_token),
+        per_channel_cast_fused_reference(
+            x,
+            pos_to_token=pos_to_token,
+            round_sf=round_sf,
+        ),
     )
     assert op.kernel.tile_k == 64
+    assert op.kernel.register_staging is True
 
 
 @pytest.mark.parametrize(
@@ -153,6 +174,7 @@ def test_per_channel_cast_fused_rescale(shape: tuple[int, int], round_sf: bool) 
         per_channel_cast_fused_reference(x, x_sf_invs=x_sf_invs, round_sf=round_sf),
     )
     assert op.kernel.tile_k == 64
+    assert op.kernel.register_staging is False
 
 
 @pytest.mark.parametrize(
@@ -160,6 +182,7 @@ def test_per_channel_cast_fused_rescale(shape: tuple[int, int], round_sf: bool) 
     [
         pytest.param((64, 256), 144, True, marks=pytest.mark.smoke),
         pytest.param((256, 512), 256, False, marks=pytest.mark.full),
+        pytest.param((513, 7168), 1024, False, marks=pytest.mark.full),
     ],
 )
 def test_per_channel_cast_fused_rescale_expand(
@@ -180,6 +203,7 @@ def test_per_channel_cast_fused_rescale_expand(
         ),
     )
     assert op.kernel.tile_k == 64
+    assert op.kernel.register_staging is False
 
 
 @pytest.mark.smoke

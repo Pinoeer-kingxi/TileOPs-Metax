@@ -6,12 +6,12 @@ from collections.abc import Callable
 
 import pytest
 import torch
-from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
 
 from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
 from benchmarks.ops.per_channel_cast_fused_baselines import (
     PerChannelCastFusedTileLangBaseline,
 )
+from tileops.kernels.quant.per_channel_cast_fused import PerChannelCastFusedKernel
 from tileops.manifest import load_workloads
 from tileops.ops import (
     QuantPerChannelCastFusedExpandOp,
@@ -20,6 +20,7 @@ from tileops.ops import (
     QuantPerChannelCastFusedRescaleOp,
 )
 from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
+from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
 
 _PLAIN_OP = "QuantPerChannelCastFusedOp"
 _EXPAND_OP = "QuantPerChannelCastFusedExpandOp"
@@ -138,6 +139,31 @@ def _make_tilelang_baseline(
     return lambda x: baseline(x)
 
 
+def _make_shared_staging_baseline(
+    *,
+    x_shape: tuple[int, int],
+    num_tokens_out: int | None,
+    in_dtype: torch.dtype,
+    with_expand: bool,
+    round_sf: bool,
+) -> Callable:
+    """Build the pre-optimization plain path for an in-process A/B."""
+    kernel = PerChannelCastFusedKernel(
+        num_tokens=x_shape[0],
+        num_tokens_out=num_tokens_out if with_expand else x_shape[0],
+        hidden=x_shape[1],
+        in_dtype=in_dtype,
+        with_rescale=False,
+        with_expand=with_expand,
+        round_sf=round_sf,
+        device=torch.device("cuda"),
+        config={"register_staging": False},
+    )
+    if with_expand:
+        return lambda x, pos_to_token: kernel(x, pos_to_token=pos_to_token)
+    return lambda x: kernel(x)
+
+
 def _assert_quant_equal(
     actual: tuple[torch.Tensor, torch.Tensor],
     expected: tuple[torch.Tensor, torch.Tensor],
@@ -189,6 +215,15 @@ def test_per_channel_cast_fused_bench(
         with_expand=with_expand,
         round_sf=round_sf,
     )
+    shared_staging_baseline = None
+    if not with_rescale:
+        shared_staging_baseline = _make_shared_staging_baseline(
+            x_shape=x_shape,
+            num_tokens_out=num_tokens_out,
+            in_dtype=dtype,
+            with_expand=with_expand,
+            round_sf=round_sf,
+        )
     benchmark = _make_manifest_benchmark(op_name, op, workload)
 
     # Establish correctness before timing and compile both TileLang kernels so
@@ -196,16 +231,27 @@ def test_per_channel_cast_fused_bench(
     expected = reference(*inputs)
     _assert_quant_equal(op(*inputs), expected)
     _assert_quant_equal(tilelang_baseline(*inputs), expected)
+    if shared_staging_baseline is not None:
+        _assert_quant_equal(shared_staging_baseline(*inputs), expected)
     torch.cuda.synchronize()
 
     result = benchmark.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
 
+    if shared_staging_baseline is not None:
+        result_shared = benchmark.profile(shared_staging_baseline, *inputs)
+        BenchmarkReport.record(
+            op_name,
+            locals(),
+            result_shared,
+            tag="tileops-shared-staging",
+        )
+
     result_tilelang = benchmark.profile(tilelang_baseline, *inputs)
-    BenchmarkReport.record(op, locals(), result_tilelang, tag="tilelang-baseline")
+    BenchmarkReport.record(op_name, locals(), result_tilelang, tag="tilelang-baseline")
 
     result_ref = benchmark.profile(reference, *inputs)
-    BenchmarkReport.record(op, locals(), result_ref, tag="torch-eager")
+    BenchmarkReport.record(op_name, locals(), result_ref, tag="torch-eager")
 
 
 if __name__ == "__main__":
