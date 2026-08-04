@@ -389,6 +389,45 @@ FusedMoeFwdCbFwdOp:
       gelu_and_mul: GeluAndMulFwdKernel
       unpermute_kernel: MoeUnpermuteKernel
 
+GroupCountFwdOp:
+  ref_api: "none"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      group_idx: {dtype: "int64"}
+    outputs:
+      counts: {dtype: "int32"}
+    params:
+      num_tokens: {type: int, kw_only: true}
+      num_topk: {type: int, kw_only: true}
+      num_groups: {type: int, default: 256, kw_only: true}
+    shape_rules:
+    - "num_tokens >= 0"
+    - "num_topk > 0"
+    - "num_groups > 0"
+    - "group_idx.shape == (num_tokens, num_topk)"
+    - "counts.shape == (num_groups,)"
+
+  workloads:
+  - {num_tokens: 512, num_topk: 8, num_groups: 256, dtypes: [int64], label: "deepseek-v3-decode-routing"}
+  - {num_tokens: 4096, num_topk: 8, num_groups: 256, dtypes: [int64], label: "deepseek-v3-prefill-routing"}
+  - {num_tokens: 4096, num_topk: 8, num_groups: 128, dtypes: [int64], label: "qwen3-235b-prefill-routing"}
+
+  roofline:
+    # GroupCount is integer routing metadata processing; no semantic FLOPs.
+    flops: "0"
+    # Read int64 group_idx and write int32 counts once per output element.
+    bytes: "num_tokens * num_topk * 8 + num_groups * 4"
+
+  source:
+    # Planned PR B locations; path existence is deferred while this entry is spec-only.
+    kernel: tileops/kernels/moe/group_count.py
+    op: tileops/ops/moe/group_count.py
+    test: tests/ops/test_group_count.py
+    bench: benchmarks/ops/bench_group_count.py
+
 # Shared fields for all MoeReduceFused variants.
 MoeReduceFusedFwdOp: &reduce_fused_base
   ref_api: "none"
