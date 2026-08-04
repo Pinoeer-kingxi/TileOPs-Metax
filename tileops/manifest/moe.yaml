@@ -839,3 +839,106 @@ MoeTopKSumGroupIdxFwdOp:
     op: tileops/ops/moe/topk_sum_group_idx.py
     test: tests/ops/test_moe_topk_sum_group_idx.py
     bench: benchmarks/ops/bench_moe_topk_sum_group_idx.py
+
+MoeExpandToFusedFwdOp:
+  ref_api: "tile_kernels.torch.expand_to_fused"
+  family: moe
+  status: spec-only
+
+  signature:
+    inputs:
+      x: {dtype: "float16 | bfloat16", shape: "[T, H]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]"}
+      pos_to_expert: {dtype: "int32", shape: "[X]"}
+    outputs:
+      expanded_x: {dtype: "same_as(x)", shape: "[X, H]"}
+    params: {}
+    shape_rules:
+    - "T > 0"
+    - "K > 0"
+    - "X >= 0"
+    - "expanded_x.shape == (pos_to_expert.shape[0], x.shape[1])"
+
+  workloads:
+  - {x_shape: [1, 7168], token_topk_to_pos_shape: [1, 8], pos_to_expert_shape: [16], dtypes: [bfloat16], label: "kimi-k2-decode"}
+  - {x_shape: [32, 7168], token_topk_to_pos_shape: [32, 8], pos_to_expert_shape: [256], dtypes: [bfloat16], label: "kimi-k2-small"}
+  - {x_shape: [512, 7168], token_topk_to_pos_shape: [512, 8], pos_to_expert_shape: [4096], dtypes: [bfloat16], label: "kimi-k2-medium"}
+  - {x_shape: [4096, 7168], token_topk_to_pos_shape: [4096, 8], pos_to_expert_shape: [32768], dtypes: [bfloat16], label: "kimi-k2-prefill"}
+  - {x_shape: [1, 3072], token_topk_to_pos_shape: [1, 8], pos_to_expert_shape: [16], dtypes: [bfloat16], label: "qwen3-30b-decode"}
+  - {x_shape: [32, 3072], token_topk_to_pos_shape: [32, 8], pos_to_expert_shape: [256], dtypes: [bfloat16], label: "qwen3-30b-small"}
+  - {x_shape: [512, 3072], token_topk_to_pos_shape: [512, 8], pos_to_expert_shape: [4096], dtypes: [bfloat16], label: "qwen3-30b-medium"}
+  - {x_shape: [4096, 3072], token_topk_to_pos_shape: [4096, 8], pos_to_expert_shape: [32768], dtypes: [bfloat16], label: "qwen3-30b-prefill"}
+
+  roofline:
+    vars:
+      T: "x.shape[0]"
+      H: "x.shape[1]"
+      K: "token_topk_to_pos.shape[1]"
+      X: "pos_to_expert.shape[0]"
+    flops: "0"
+    # x read + token/position mappings read + expanded output write.
+    bytes: "T * H * elem_bytes + T * K * 4 + X * 4 + X * H * elem_bytes"
+
+  source:
+    # Planned PR B locations; path existence is deferred while spec-only.
+    kernel: tileops/kernels/moe/expand_to_fused.py
+    op: tileops/ops/moe/expand_to_fused.py
+    test: tests/ops/test_moe_expand_to_fused.py
+    bench: benchmarks/ops/bench_moe_expand_to_fused.py
+
+MoeExpandToFusedWithSFFwdOp:
+  ref_api: "tile_kernels.torch.expand_to_fused_with_sf"
+  family: moe
+  status: spec-only
+  variant_of: MoeExpandToFusedFwdOp
+
+  signature:
+    inputs:
+      x: {dtype: "float8_e4m3fn", shape: "[T, H]"}
+      x_sf: {dtype: "float32 | int32", shape: "[T, S]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]"}
+      pos_to_expert: {dtype: "int32", shape: "[X]"}
+    outputs:
+      expanded_x: {dtype: "same_as(x)", shape: "[X, H]"}
+      expanded_x_sf: {dtype: "same_as(x_sf)", shape: "[X, S]"}
+    params:
+      num_per_channels: {type: int}
+      use_tma_aligned_col_major_sf: {type: bool, default: false}
+    shape_rules:
+    - "T > 0"
+    - "K > 0"
+    - "S > 0"
+    - "X >= 0"
+    - "num_per_channels == 32 or num_per_channels == 128"
+    - "expanded_x.shape == (pos_to_expert.shape[0], x.shape[1])"
+    - "expanded_x_sf.shape == (pos_to_expert.shape[0], x_sf.shape[1])"
+    # For float32 scale factors S=ceil(H/num_per_channels). For packed
+    # UE8M0/int32 scale factors S=ceil(ceil(H/num_per_channels)/4), with
+    # use_tma_aligned_col_major_sf=True. PR B must validate both forms.
+
+  workloads:
+  - {x_shape: [1, 7168], x_sf_shape: [1, 56], token_topk_to_pos_shape: [1, 8], pos_to_expert_shape: [16], num_per_channels: 128, use_tma_aligned_col_major_sf: false, dtypes: [float8_e4m3fn], label: "kimi-k2-decode-sf-row-major"}
+  - {x_shape: [512, 7168], x_sf_shape: [512, 56], token_topk_to_pos_shape: [512, 8], pos_to_expert_shape: [4096], num_per_channels: 128, use_tma_aligned_col_major_sf: false, dtypes: [float8_e4m3fn], label: "kimi-k2-medium-sf-row-major"}
+  - {x_shape: [1, 7168], x_sf_shape: [1, 14], token_topk_to_pos_shape: [1, 8], pos_to_expert_shape: [16], num_per_channels: 128, use_tma_aligned_col_major_sf: true, dtypes: [float8_e4m3fn], label: "kimi-k2-decode-sf-packed"}
+  - {x_shape: [512, 7168], x_sf_shape: [512, 14], token_topk_to_pos_shape: [512, 8], pos_to_expert_shape: [4096], num_per_channels: 128, use_tma_aligned_col_major_sf: true, dtypes: [float8_e4m3fn], label: "kimi-k2-medium-sf-packed"}
+  - {x_shape: [32, 3072], x_sf_shape: [32, 24], token_topk_to_pos_shape: [32, 8], pos_to_expert_shape: [256], num_per_channels: 128, use_tma_aligned_col_major_sf: false, dtypes: [float8_e4m3fn], label: "qwen3-30b-small-sf-row-major"}
+  - {x_shape: [32, 3072], x_sf_shape: [32, 6], token_topk_to_pos_shape: [32, 8], pos_to_expert_shape: [256], num_per_channels: 128, use_tma_aligned_col_major_sf: true, dtypes: [float8_e4m3fn], label: "qwen3-30b-small-sf-packed"}
+
+  roofline:
+    vars:
+      T: "x.shape[0]"
+      H: "x.shape[1]"
+      K: "token_topk_to_pos.shape[1]"
+      S: "x_sf.shape[1]"
+      X: "pos_to_expert.shape[0]"
+    flops: "0"
+    # x/x_sf read + token/position mappings read + expanded x/x_sf writes.
+    # Scale factors are always 4-byte float32 or packed int32 values.
+    bytes: "T * H * elem_bytes + T * S * 4 + T * K * 4 + X * 4 + X * H * elem_bytes + X * S * 4"
+
+  source:
+    # Same planned PR B implementation as the primary entry.
+    kernel: tileops/kernels/moe/expand_to_fused.py
+    op: tileops/ops/moe/expand_to_fused.py
+    test: tests/ops/test_moe_expand_to_fused.py
+    bench: benchmarks/ops/bench_moe_expand_to_fused.py
