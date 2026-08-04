@@ -1,4 +1,8 @@
-"""Independent PyTorch reference for fused per-channel FP8 quantization."""
+"""Pinned eager-PyTorch reference for fused per-channel FP8 quantization.
+
+This acceptance baseline intentionally stays as ordinary eager PyTorch
+primitives in correctness and performance tests.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,10 @@ import torch
 _FP8_MAX = 448.0
 _NUM_PER_TOKENS = 128
 _NUM_PER_CHANNELS = 128
+
+UPSTREAM_COMMIT = "0266ab740980de7dc03a828b8259cd73d100c2eb"
+UPSTREAM_TORCH_REFERENCE_PATH = "tile_kernels/torch/per_channel_cast_fused.py"
+UPSTREAM_TORCH_REFERENCE_SHA256 = "6af7609cf7462619dd902845bc17aad5402b5fe4f3c3c8eb4a6670a4e62a481f"
 
 
 def per_channel_cast_fused_reference(

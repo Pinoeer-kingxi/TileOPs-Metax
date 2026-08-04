@@ -22,8 +22,22 @@ _NUM_PER_TOKENS = 128
 _NUM_PER_CHANNELS = 128
 _NUM_THREADS = 256
 _NUM_THREADS_PER_TOKEN = 64
+_TILE_K = 64
+_C500_SHARED_MEMORY_LIMIT_BYTES = 64 * 1024
 _FP8_MAX = 448.0
 _MIN_AMAX = 1e-4
+
+
+def _shared_memory_bytes(tile_k: int, in_dtype: torch.dtype) -> int:
+    """Return explicit staging and reduction shared memory per workgroup."""
+    if tile_k <= 0 or tile_k % _NUM_THREADS_PER_TOKEN != 0:
+        raise ValueError(
+            f"tile_k must be a positive multiple of {_NUM_THREADS_PER_TOKEN}, got {tile_k}"
+        )
+    element_bytes = torch.empty((), dtype=in_dtype).element_size()
+    staging_bytes = _NUM_PER_TOKENS * tile_k * element_bytes
+    reduction_bytes = (tile_k // _NUM_THREADS_PER_TOKEN) * _NUM_THREADS * 4
+    return staging_bytes + reduction_bytes
 
 
 @tilelang.jit(
@@ -42,11 +56,12 @@ def _per_channel_cast_fused_kernel(
     round_sf: bool,
 ):
     tile_m = _NUM_PER_TOKENS
-    # A 128x128 FP32 staging tile plus the reduction scratch exceeds the
-    # C500's 64 KiB shared-memory limit. Splitting only the hidden tile keeps
-    # the full 128-token scale block intact while reducing shared memory to
-    # about 33 KiB for the FP32 path.
-    tile_k = 256 if with_rescale else (64 if in_dtype == "float32" else 128)
+    # Keep the hidden tile at one C500 wave. In particular, a 128x128 FP32
+    # staging tile plus reduction scratch needs about 66 KiB of shared memory,
+    # exceeding the C500's 64 KiB limit. A fixed tile of 64 is safe for every
+    # supported path and also exposes more workgroups than the upstream
+    # 128/256-column configurations.
+    tile_k = _TILE_K
     vec_k = tile_k // _NUM_THREADS_PER_TOKEN
     vec_m = tile_m * _NUM_THREADS_PER_TOKEN // _NUM_THREADS
     sf_cols = hidden // _NUM_PER_CHANNELS if with_rescale else 1
@@ -203,6 +218,14 @@ class PerChannelCastFusedKernel(Kernel):
         self.with_expand = with_expand
         self.round_sf = round_sf
         self.device = device
+        self.tile_k = _TILE_K
+        self.shared_memory_bytes = _shared_memory_bytes(self.tile_k, self.dtype)
+        if self.shared_memory_bytes > _C500_SHARED_MEMORY_LIMIT_BYTES:
+            raise ValueError(
+                "per-channel fused cast shared-memory requirement exceeds "
+                f"the C500 limit: {self.shared_memory_bytes} > "
+                f"{_C500_SHARED_MEMORY_LIMIT_BYTES} bytes"
+            )
         self.kernel = _per_channel_cast_fused_kernel(
             num_tokens,
             num_tokens_out,

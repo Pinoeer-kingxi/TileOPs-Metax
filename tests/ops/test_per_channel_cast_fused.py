@@ -5,6 +5,10 @@ from __future__ import annotations
 import pytest
 import torch
 
+from tileops.kernels.quant.per_channel_cast_fused import (
+    _C500_SHARED_MEMORY_LIMIT_BYTES,
+    _shared_memory_bytes,
+)
 from tileops.ops import (
     QuantPerChannelCastFusedExpandOp,
     QuantPerChannelCastFusedOp,
@@ -46,6 +50,16 @@ def _assert_quant_equal(
     torch.testing.assert_close(out_sf, out_sf_ref, atol=1e-7, rtol=1e-6)
 
 
+@pytest.mark.smoke
+def test_per_channel_cast_fused_c500_shared_memory_budget() -> None:
+    assert _shared_memory_bytes(64, torch.float32) == 33_792
+    assert _shared_memory_bytes(128, torch.float32) == 67_584
+    assert _shared_memory_bytes(128, torch.bfloat16) == 34_816
+    assert _shared_memory_bytes(256, torch.float8_e4m3fn) == 36_864
+    assert _shared_memory_bytes(128, torch.float32) > _C500_SHARED_MEMORY_LIMIT_BYTES
+    assert _shared_memory_bytes(64, torch.float32) <= _C500_SHARED_MEMORY_LIMIT_BYTES
+
+
 @pytest.mark.parametrize(
     "shape, dtype, round_sf",
     [
@@ -61,6 +75,8 @@ def test_per_channel_cast_fused_plain(
     x = torch.randn(shape, device="cuda", dtype=dtype)
     op = QuantPerChannelCastFusedOp(round_sf=round_sf)
     _assert_quant_equal(op(x), per_channel_cast_fused_reference(x, round_sf=round_sf))
+    assert op.kernel.tile_k == 64
+    assert op.kernel.shared_memory_bytes <= _C500_SHARED_MEMORY_LIMIT_BYTES
 
 
 @pytest.mark.smoke
@@ -118,6 +134,7 @@ def test_per_channel_cast_fused_expand_output_sizes(
         op(x, pos_to_token),
         per_channel_cast_fused_reference(x, pos_to_token=pos_to_token),
     )
+    assert op.kernel.tile_k == 64
 
 
 @pytest.mark.parametrize(
@@ -135,6 +152,7 @@ def test_per_channel_cast_fused_rescale(shape: tuple[int, int], round_sf: bool) 
         op(x, x_sf_invs),
         per_channel_cast_fused_reference(x, x_sf_invs=x_sf_invs, round_sf=round_sf),
     )
+    assert op.kernel.tile_k == 64
 
 
 @pytest.mark.parametrize(
@@ -161,6 +179,7 @@ def test_per_channel_cast_fused_rescale_expand(
             round_sf=round_sf,
         ),
     )
+    assert op.kernel.tile_k == 64
 
 
 @pytest.mark.smoke

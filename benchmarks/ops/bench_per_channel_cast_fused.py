@@ -6,8 +6,12 @@ from collections.abc import Callable
 
 import pytest
 import torch
+from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
 
 from benchmarks.benchmark_base import BenchmarkReport, ManifestBenchmark
+from benchmarks.ops.per_channel_cast_fused_baselines import (
+    PerChannelCastFusedTileLangBaseline,
+)
 from tileops.manifest import load_workloads
 from tileops.ops import (
     QuantPerChannelCastFusedExpandOp,
@@ -16,7 +20,6 @@ from tileops.ops import (
     QuantPerChannelCastFusedRescaleOp,
 )
 from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
-from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
 
 _PLAIN_OP = "QuantPerChannelCastFusedOp"
 _EXPAND_OP = "QuantPerChannelCastFusedExpandOp"
@@ -107,6 +110,42 @@ def _make_reference(
     return lambda x: per_channel_cast_fused_reference(x, round_sf=round_sf)
 
 
+def _make_tilelang_baseline(
+    *,
+    hidden: int,
+    in_dtype: torch.dtype,
+    with_rescale: bool,
+    with_expand: bool,
+    round_sf: bool,
+) -> Callable:
+    baseline = PerChannelCastFusedTileLangBaseline(
+        hidden=hidden,
+        in_dtype=in_dtype,
+        with_rescale=with_rescale,
+        with_expand=with_expand,
+        round_sf=round_sf,
+    )
+    if with_rescale and with_expand:
+        return lambda x, x_sf_invs, pos_to_token: baseline(
+            x,
+            x_sf_invs=x_sf_invs,
+            pos_to_token=pos_to_token,
+        )
+    if with_rescale:
+        return lambda x, x_sf_invs: baseline(x, x_sf_invs=x_sf_invs)
+    if with_expand:
+        return lambda x, pos_to_token: baseline(x, pos_to_token=pos_to_token)
+    return lambda x: baseline(x)
+
+
+def _assert_quant_equal(
+    actual: tuple[torch.Tensor, torch.Tensor],
+    expected: tuple[torch.Tensor, torch.Tensor],
+) -> None:
+    torch.testing.assert_close(actual[0].float(), expected[0].float(), atol=0, rtol=0)
+    torch.testing.assert_close(actual[1], expected[1], atol=1e-7, rtol=1e-6)
+
+
 def _make_manifest_benchmark(op_name: str, op, workload):
     try:
         factory = _BENCHMARK_FACTORIES[op_name]
@@ -143,18 +182,30 @@ def test_per_channel_cast_fused_bench(
         with_expand=with_expand,
         round_sf=round_sf,
     )
+    tilelang_baseline = _make_tilelang_baseline(
+        hidden=x_shape[1],
+        in_dtype=dtype,
+        with_rescale=with_rescale,
+        with_expand=with_expand,
+        round_sf=round_sf,
+    )
     benchmark = _make_manifest_benchmark(op_name, op, workload)
 
-    # Compile before profiling so JIT time is excluded from both measurements.
-    op(*inputs)
-    reference(*inputs)
+    # Establish correctness before timing and compile both TileLang kernels so
+    # JIT time is excluded. The PyTorch path remains eager by design.
+    expected = reference(*inputs)
+    _assert_quant_equal(op(*inputs), expected)
+    _assert_quant_equal(tilelang_baseline(*inputs), expected)
     torch.cuda.synchronize()
 
     result = benchmark.profile(op, *inputs)
     BenchmarkReport.record(op, locals(), result, tag="tileops")
 
+    result_tilelang = benchmark.profile(tilelang_baseline, *inputs)
+    BenchmarkReport.record(op, locals(), result_tilelang, tag="tilelang-baseline")
+
     result_ref = benchmark.profile(reference, *inputs)
-    BenchmarkReport.record(op, locals(), result_ref, tag="torch-ref")
+    BenchmarkReport.record(op, locals(), result_ref, tag="torch-eager")
 
 
 if __name__ == "__main__":
