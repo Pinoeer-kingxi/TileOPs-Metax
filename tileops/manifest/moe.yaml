@@ -389,44 +389,172 @@ FusedMoeFwdCbFwdOp:
       gelu_and_mul: GeluAndMulFwdKernel
       unpermute_kernel: MoeUnpermuteKernel
 
-GroupCountFwdOp:
+# 鈹€鈹€ MoeReduceFused 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# Shared fields for all MoeReduceFused variants.
+MoeReduceFusedFwdOp: &reduce_fused_base
   ref_api: "none"
   family: moe
   status: spec-only
+  source:
+    kernel: tileops/kernels/moe/reduce_fused.py
+    op: tileops/ops/moe/reduce_fused.py
+    test: tests/ops/test_moe_reduce_fused.py
+    bench: benchmarks/ops/bench_moe_reduce_fused.py
+    bench_manifest_driven: true
+    kernel_map:
+      reduce_fused_kernel: MoeReduceFusedKernel
 
   signature:
     inputs:
-      group_idx: {dtype: "int64"}
+      x: {dtype: "float16 | bfloat16 | float32", shape: "[E, H]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]", note: "-1 indicates a padding slot, skipped during reduction"}
+      topk_weights: {dtype: "float32", shape: "[T, K]"}
     outputs:
-      counts: {dtype: "int32"}
+      out: {dtype: "same_as(x)", shape: "[T, H]"}
     params:
-      num_tokens: {type: int, kw_only: true}
-      num_topk: {type: int, kw_only: true}
-      num_groups: {type: int, default: 256, kw_only: true}
+      num_tokens: {type: int}
+      num_topk: {type: int}
+      hidden: {type: int}
+      out: {type: tensor, default: null, note: "optional pre-allocated output, created automatically when omitted"}
     shape_rules:
-    - "num_tokens >= 0"
-    - "num_topk > 0"
-    - "num_groups > 0"
-    - "group_idx.shape == (num_tokens, num_topk)"
-    - "counts.shape == (num_groups,)"
+    - "E == T * K"
+    - "T == num_tokens"
+    - "K == num_topk"
+    - "H == hidden"
+    - "hidden % 256 == 0"
 
   workloads:
-  - {num_tokens: 512, num_topk: 8, num_groups: 256, dtypes: [int64], label: "deepseek-v3-decode-routing"}
-  - {num_tokens: 4096, num_topk: 8, num_groups: 256, dtypes: [int64], label: "deepseek-v3-prefill-routing"}
-  - {num_tokens: 4096, num_topk: 8, num_groups: 128, dtypes: [int64], label: "qwen3-235b-prefill-routing"}
+    # DeepSeek-V3: H=7168, K=8
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "deepseek-v3-decode"}
+  - {num_tokens: 4096, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "deepseek-v3-prefill"}
+    # Qwen3-235B-A22B: H=7168, K=8
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "qwen3-235b-decode"}
+    # Qwen3-30B-A3B: H=3072, K=8
+  - {num_tokens: 512, num_topk: 8, hidden: 3072, dtypes: [bfloat16], label: "qwen3-30b-decode"}
+    # Kimi K2: H=7168, K=8
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "kimi-k2-decode"}
+    # fp16 smoke
+  - {num_tokens: 32, num_topk: 2, hidden: 256, dtypes: [float16], label: "tiny-fp16-smoke"}
 
   roofline:
-    # GroupCount is integer routing metadata processing; no semantic FLOPs.
-    flops: "0"
-    # Read int64 group_idx and write int32 counts once per output element.
-    bytes: "num_tokens * num_topk * 8 + num_groups * 4"
+    vars:
+      T: num_tokens
+      K: num_topk
+      H: hidden
+    # One multiply-add per (token, topk slot, hidden element).
+    flops: "2 * T * K * H"
+    # x read [T*K, H] + topk_weights read [T, K] float32 +
+    # token_topk_to_pos read [T, K] int32 + out write [T, H].
+    bytes: "(T * K * H + T * H) * elem_bytes + T * K * 4 + T * K * 4"
 
-  source:
-    # Planned PR B locations; path existence is deferred while this entry is spec-only.
-    kernel: tileops/kernels/moe/group_count.py
-    op: tileops/ops/moe/group_count.py
-    test: tests/ops/test_group_count.py
-    bench: benchmarks/ops/bench_group_count.py
+MoeReduceFusedWithXsfFwdOp:
+  <<: *reduce_fused_base
+  variant_of: MoeReduceFusedFwdOp
+  signature:
+    inputs:
+      x: {dtype: "float16 | bfloat16 | float32", shape: "[E, H]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]", note: "-1 indicates a padding slot, skipped during reduction"}
+      topk_weights: {dtype: "float32", shape: "[T, K]"}
+      x_sf: {dtype: "float32", shape: "[E]", note: "per-token scaling factor (x_sf extracted from QuantTensor)"}
+    outputs:
+      out: {dtype: "same_as(x)", shape: "[T, H]"}
+    params:
+      num_tokens: {type: int}
+      num_topk: {type: int}
+      hidden: {type: int}
+      out: {type: tensor, default: null, note: "optional pre-allocated output, created automatically when omitted"}
+    shape_rules:
+    - "E == T * K"
+    - "T == num_tokens"
+    - "K == num_topk"
+    - "H == hidden"
+    - "hidden % 256 == 0"
+
+  workloads:
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "deepseek-v3-decode-xsf"}
+  - {num_tokens: 32, num_topk: 2, hidden: 256, dtypes: [float16], label: "tiny-fp16-xsf-smoke"}
+
+  roofline:
+    vars:
+      T: num_tokens
+      K: num_topk
+      H: hidden
+    flops: "2 * T * K * H"
+    # Additional x_sf read [T*K] float32 vs base.
+    bytes: "(T * K * H + T * H) * elem_bytes + T * K * 4 + T * K * 4 + T * K * 4"
+
+MoeReduceFusedFp8FwdOp:
+  <<: *reduce_fused_base
+  variant_of: MoeReduceFusedFwdOp
+  signature:
+    inputs:
+      x: {dtype: "float16 | bfloat16 | float32", shape: "[E, H]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]", note: "-1 indicates a padding slot, skipped during reduction"}
+      topk_weights: {dtype: "float32", shape: "[T, K]"}
+      sf: {dtype: "float32", shape: "[1]", note: "required global scaling factor for FP8 output"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[T, H]"}
+    params:
+      num_tokens: {type: int}
+      num_topk: {type: int}
+      hidden: {type: int}
+      out: {type: tensor, default: null, note: "optional pre-allocated output, created automatically when omitted"}
+    shape_rules:
+    - "E == T * K"
+    - "T == num_tokens"
+    - "K == num_topk"
+    - "H == hidden"
+    - "hidden % 256 == 0"
+
+  workloads:
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "deepseek-v3-decode-fp8out"}
+  - {num_tokens: 32, num_topk: 2, hidden: 256, dtypes: [float16], label: "tiny-fp16-fp8out-smoke"}
+
+  roofline:
+    vars:
+      T: num_tokens
+      K: num_topk
+      H: hidden
+    flops: "2 * T * K * H"
+    # out dtype is float8 (1 byte/elem); additional sf read [1] float32.
+    bytes: "(T * K * H) * elem_bytes + (T * H) * 1 + T * K * 4 + T * K * 4 + 4"
+
+MoeReduceFusedQuantizedFwdOp:
+  <<: *reduce_fused_base
+  variant_of: MoeReduceFusedFwdOp
+  signature:
+    inputs:
+      x: {dtype: "float16 | bfloat16 | float32", shape: "[E, H]"}
+      token_topk_to_pos: {dtype: "int32", shape: "[T, K]", note: "-1 indicates a padding slot, skipped during reduction"}
+      topk_weights: {dtype: "float32", shape: "[T, K]"}
+      x_sf: {dtype: "float32", shape: "[E]", note: "per-token scaling factor (x_sf extracted from QuantTensor)"}
+      sf: {dtype: "float32", shape: "[1]", note: "required global scaling factor for FP8 output"}
+    outputs:
+      out: {dtype: "float8_e4m3fn", shape: "[T, H]"}
+    params:
+      num_tokens: {type: int}
+      num_topk: {type: int}
+      hidden: {type: int}
+      out: {type: tensor, default: null, note: "optional pre-allocated output, created automatically when omitted"}
+    shape_rules:
+    - "E == T * K"
+    - "T == num_tokens"
+    - "K == num_topk"
+    - "H == hidden"
+    - "hidden % 256 == 0"
+
+  workloads:
+  - {num_tokens: 512, num_topk: 8, hidden: 7168, dtypes: [bfloat16], label: "deepseek-v3-decode-fullquant"}
+  - {num_tokens: 32, num_topk: 2, hidden: 256, dtypes: [float16], label: "tiny-fp16-fullquant-smoke"}
+
+  roofline:
+    vars:
+      T: num_tokens
+      K: num_topk
+      H: hidden
+    flops: "2 * T * K * H"
+    # FP8 output (1 byte/elem) + both x_sf [T*K] float32 and sf [1] float32.
+    bytes: "(T * K * H) * elem_bytes + (T * H) * 1 + T * K * 4 + T * K * 4 + T * K * 4 + 4"
 
 MoeTop2SumGateFwdOp:
   ref_api: "none"
