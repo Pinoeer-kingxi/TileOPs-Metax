@@ -74,6 +74,12 @@ from .pool import (
     MaxPool3dFwdOp,
     MaxPool3dIndicesFwdOp,
 )
+from .quant import (
+    QuantPerChannelCastFusedExpandOp,
+    QuantPerChannelCastFusedOp,
+    QuantPerChannelCastFusedRescaleExpandOp,
+    QuantPerChannelCastFusedRescaleOp,
+)
 
 # --- Reduction ops (uncomment as sub-category PRs land) ---
 from .reduction import (
@@ -187,6 +193,10 @@ __all__ = [
     "NSATopkVarlenOp",
     "Op",
     "MoePermuteAlignFwdOp",
+    "QuantPerChannelCastFusedExpandOp",
+    "QuantPerChannelCastFusedOp",
+    "QuantPerChannelCastFusedRescaleExpandOp",
+    "QuantPerChannelCastFusedRescaleOp",
     "RMSNormFwdOp",
     "Mamba2FwdOp",
     "SSDChunkScanFwdOp",

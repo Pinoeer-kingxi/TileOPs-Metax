@@ -101,7 +101,7 @@ QuantSwiGLUFwdChannelCastTransposeOp:
 QuantPerChannelCastFusedOp:
   ref_api: "none"
   family: quantization
-  status: spec-only
+  status: implemented
 
   signature:
     inputs:
@@ -149,7 +149,7 @@ QuantPerChannelCastFusedOp:
 QuantPerChannelCastFusedExpandOp:
   ref_api: "none"
   family: quantization
-  status: spec-only
+  status: implemented
   variant_of: QuantPerChannelCastFusedOp
 
   signature:
@@ -197,7 +197,7 @@ QuantPerChannelCastFusedExpandOp:
 QuantPerChannelCastFusedRescaleOp:
   ref_api: "none"
   family: quantization
-  status: spec-only
+  status: implemented
   variant_of: QuantPerChannelCastFusedOp
 
   signature:
@@ -249,7 +249,7 @@ QuantPerChannelCastFusedRescaleOp:
 QuantPerChannelCastFusedRescaleExpandOp:
   ref_api: "none"
   family: quantization
-  status: spec-only
+  status: implemented
   variant_of: QuantPerChannelCastFusedOp
 
   signature:

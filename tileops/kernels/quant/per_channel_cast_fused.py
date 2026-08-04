@@ -1,0 +1,236 @@
+# 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
+
+"""Fused per-channel FP8 quantization kernels.
+
+The kernel quantizes 128-token blocks independently for every hidden
+channel.  It optionally gathers/expands tokens and optionally rescales an
+FP8 input with per-token, per-128-channel scaling factors before computing
+the new per-channel scale.
+"""
+
+from typing import Optional
+
+import tilelang
+import tilelang.language as T
+import torch
+
+from ..kernel_base import Kernel
+
+__all__ = ["PerChannelCastFusedKernel"]
+
+_NUM_PER_TOKENS = 128
+_NUM_PER_CHANNELS = 128
+_NUM_THREADS = 256
+_NUM_THREADS_PER_TOKEN = 64
+_FP8_MAX = 448.0
+_MIN_AMAX = 1e-4
+
+
+@tilelang.jit(
+    out_idx=[1, 2],
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    },
+)
+def _per_channel_cast_fused_kernel(
+    num_tokens: int,
+    num_tokens_out: int,
+    hidden: int,
+    in_dtype: str,
+    with_rescale: bool,
+    with_expand: bool,
+    round_sf: bool,
+):
+    tile_m = _NUM_PER_TOKENS
+    # A 128x128 FP32 staging tile plus the reduction scratch exceeds the
+    # C500's 64 KiB shared-memory limit. Splitting only the hidden tile keeps
+    # the full 128-token scale block intact while reducing shared memory to
+    # about 33 KiB for the FP32 path.
+    tile_k = 256 if with_rescale else (64 if in_dtype == "float32" else 128)
+    vec_k = tile_k // _NUM_THREADS_PER_TOKEN
+    vec_m = tile_m * _NUM_THREADS_PER_TOKEN // _NUM_THREADS
+    sf_cols = hidden // _NUM_PER_CHANNELS if with_rescale else 1
+    pos_size = num_tokens_out if with_expand else 1
+
+    @T.macro
+    def _scale_and_inverse(amax: T.float32):
+        clamped_amax = T.max(amax, _MIN_AMAX)
+        sf = T.alloc_var(T.float32)
+        sf_inv = T.alloc_var(T.float32)
+        sf = clamped_amax / _FP8_MAX
+        sf_inv = _FP8_MAX / clamped_amax
+        if round_sf:
+            bits = T.reinterpret(sf, T.uint32)
+            exp_sf = ((bits - 1) >> 23) + 1 - 127
+            sf = T.reinterpret((127 + exp_sf) << 23, T.float32)
+            sf_inv = T.reinterpret((127 - exp_sf) << 23, T.float32)
+        return sf, sf_inv
+
+    @T.prim_func
+    def main(
+        x: T.Tensor((num_tokens, hidden), in_dtype),
+        out: T.Tensor((num_tokens_out, hidden), T.float8_e4m3fn),
+        out_sf: T.Tensor((T.ceildiv(num_tokens_out, _NUM_PER_TOKENS), hidden), T.float32),
+        x_sf_invs: T.Tensor((num_tokens, sf_cols), T.float32),
+        pos_to_token: T.Tensor((pos_size,), T.int32),
+    ):
+        with T.Kernel(
+            T.ceildiv(num_tokens_out, tile_m),
+            T.ceildiv(hidden, tile_k),
+            threads=_NUM_THREADS,
+        ) as (pid_token, pid_hidden):
+            x_shared = T.alloc_shared((tile_m, tile_k), in_dtype)
+            pos_to_token_local = T.alloc_local((vec_m,), T.int32)
+            sf_invs_local = T.alloc_local((vec_m,), T.float32)
+            amax_local = T.alloc_local((vec_k,), T.float32)
+            amax_shared = T.alloc_shared((vec_k, _NUM_THREADS), T.float32)
+            in_local = T.alloc_local((vec_k,), in_dtype)
+            out_local = T.alloc_local((vec_k,), T.float8_e4m3fn)
+
+            tid = T.get_thread_binding(0)
+            m_id = tid // _NUM_THREADS_PER_TOKEN
+            k_id = tid % _NUM_THREADS_PER_TOKEN
+            m_offset = pid_token * tile_m + m_id * vec_m
+            k_offset = pid_hidden * tile_k + k_id * vec_k
+            source_token = T.alloc_var(T.int32)
+            logical_value = T.alloc_var(T.float32)
+
+            if with_expand:
+                tmp = T.alloc_var(T.int32)
+                tmp = -1
+                if k_id < vec_m:
+                    pos_idx = m_offset + k_id
+                    if pos_idx < num_tokens_out:
+                        tmp = pos_to_token[pos_idx]
+                for i in T.serial(vec_m):
+                    pos_to_token_local[i] = T.shfl_sync(tmp, i)
+
+            if with_rescale:
+                for i in T.serial(vec_m):
+                    out_token = m_offset + i
+                    source_token = out_token
+                    if with_expand:
+                        source_token = pos_to_token_local[i]
+                    if out_token < num_tokens_out and source_token >= 0:
+                        sf_invs_local[i] = x_sf_invs[
+                            source_token,
+                            (pid_hidden * tile_k + k_id * vec_k) // _NUM_PER_CHANNELS,
+                        ]
+                    else:
+                        sf_invs_local[i] = 0.0
+
+            T.clear(amax_local)
+            for i in T.serial(vec_m):
+                out_token = m_offset + i
+                source_token = out_token
+                if with_expand:
+                    source_token = pos_to_token_local[i]
+                if out_token < num_tokens_out and source_token >= 0:
+                    for j in T.vectorized(vec_k):
+                        in_local[j] = x[source_token, k_offset + j]
+                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = in_local[j]
+                    for j in T.vectorized(vec_k):
+                        logical_value = T.cast(in_local[j], T.float32)
+                        if with_rescale:
+                            logical_value = logical_value * sf_invs_local[i]
+                        amax_local[j] = T.max(amax_local[j], T.abs(logical_value))
+                else:
+                    for j in T.vectorized(vec_k):
+                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = 0.0
+
+            for i in T.unroll(vec_k):
+                amax_shared[i, tid] = amax_local[i]
+
+            sf = T.alloc_var(T.float32)
+            sf_inv = T.alloc_var(T.float32)
+            sf = 0.0
+            sf_inv = 0.0
+            col_id = tid % _NUM_THREADS_PER_TOKEN * vec_k + tid // _NUM_THREADS_PER_TOKEN
+            if tid < tile_k:
+                for i in T.serial(
+                    col_id // vec_k,
+                    _NUM_THREADS,
+                    _NUM_THREADS_PER_TOKEN,
+                ):
+                    sf = T.max(sf, amax_shared[col_id % vec_k, i])
+                sf, sf_inv = _scale_and_inverse(sf)
+                out_sf[pid_token, pid_hidden * tile_k + col_id] = sf
+                amax_shared[0, tid] = sf_inv
+
+            for i in T.serial(vec_k):
+                amax_local[i] = amax_shared[0, k_id + i * _NUM_THREADS_PER_TOKEN]
+
+            for i in T.serial(vec_m):
+                out_token = m_offset + i
+                for j in T.vectorized(vec_k):
+                    in_local[j] = x_shared[m_id * vec_m + i, k_id * vec_k + j]
+                for j in T.vectorized(vec_k):
+                    logical_value = T.cast(in_local[j], T.float32)
+                    if with_rescale:
+                        logical_value = logical_value * sf_invs_local[i]
+                    out_local[j] = logical_value * amax_local[j]
+                if out_token < num_tokens_out:
+                    for j in T.vectorized(vec_k):
+                        out[out_token, k_offset + j] = out_local[j]
+
+    return main
+
+
+class PerChannelCastFusedKernel(Kernel):
+    """TileLang implementation shared by the four fused-cast variants."""
+
+    supported_archs: list[int] = [80]
+
+    def __init__(
+        self,
+        num_tokens: int,
+        num_tokens_out: int,
+        hidden: int,
+        in_dtype: torch.dtype,
+        with_rescale: bool,
+        with_expand: bool,
+        round_sf: bool,
+        device: torch.device,
+        config: Optional[dict] = None,
+        tune: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.num_tokens_out = num_tokens_out
+        self.hidden = hidden
+        self.dtype = in_dtype
+        self.with_rescale = with_rescale
+        self.with_expand = with_expand
+        self.round_sf = round_sf
+        self.device = device
+        self.kernel = _per_channel_cast_fused_kernel(
+            num_tokens,
+            num_tokens_out,
+            hidden,
+            self.dtype_str,
+            with_rescale,
+            with_expand,
+            round_sf,
+        )
+        self._dummy_sf = None
+        self._dummy_pos = None
+        if not with_rescale:
+            self._dummy_sf = torch.empty((num_tokens, 1), dtype=torch.float32, device=device)
+        if not with_expand:
+            self._dummy_pos = torch.empty((1,), dtype=torch.int32, device=device)
+        self.init_config(config, tune)
+
+    @property
+    def default_config(self) -> dict:
+        return {}
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        x_sf_invs: Optional[torch.Tensor] = None,
+        pos_to_token: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        sf_arg = x_sf_invs if self.with_rescale else self._dummy_sf
+        pos_arg = pos_to_token if self.with_expand else self._dummy_pos
+        out, out_sf = self.kernel(x, sf_arg, pos_arg)
+        return out, out_sf
