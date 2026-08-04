@@ -4,6 +4,9 @@
 TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLang Kernel
 计算过程、访存模型、正确性测试、Benchmark、mcProfiler 和 Roofline 实测。
 
+迁移完成后的外部实现对比、`tile_k=64` 两轮 A/B、失败实验和分阶段开发
+计划见 [深度优化分析与开发计划](OPTIMIZATION_ANALYSIS.md)。
+
 ## 1. 迁移信息
 
 | 项目 | 内容 |
@@ -11,10 +14,16 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | 算子 | `quant_per_channel_cast_fused` |
 | TileOPs 分支 | `feat/quant-per-channel-cast-fused` |
 | TileOPs 迁移基线 | `70c85c45bd476ee53134afcd36d90a19fbf409c5` |
-| 已测试实现提交 | `967b65b7775f9523b884bacf410bb66032c505f0` |
-| 上游仓库 | `/data/TileKernels-Metax` |
+| 原迁移实现提交 | `967b65b7775f9523b884bacf410bb66032c505f0` |
+| `tile_k=64` 与固定基线提交 | `253fe14e7c33e5c9851e6120d46caf78cbe3d13b` |
+| 上游仓库 | `https://github.com/MetaX-MACA/TileKernels-Metax` |
 | 上游提交 | `0266ab740980de7dc03a828b8259cd73d100c2eb` |
-| 上游代码 | `tile_kernels/torch/per_channel_cast_fused.py` |
+| 上游 TileLang 源码 | `tile_kernels/quant/per_channel_cast_fused_kernel.py` |
+| 上游 TileLang SHA256 | `64e7ad56bd8ea125c561b1726a1cdf13ce78bf722cb9bef520452026157edafc` |
+| 上游 PyTorch reference | `tile_kernels/torch/per_channel_cast_fused.py` |
+| 上游 PyTorch SHA256 | `6af7609cf7462619dd902845bc17aad5402b5fe4f3c3c8eb4a6670a4e62a481f` |
+| 仓内固定 TileLang baseline blob | `4a1c4722fd6dcd3f9fbc295ed3cb2fcbdb76d652` |
+| 仓内 eager PyTorch baseline blob | `adc604bcd8c10c06f01bc6f84f9bb79f582aa286` |
 | Manifest PR | https://gitlink.org.cn/ccf-ai-infra/TileOPs-Metax/pulls/29 |
 | 实测日期 | 2026-08-04 |
 | 实测设备 | MetaX C500，25% sGPU 切片 |
@@ -43,7 +52,9 @@ TileOPs-Metax/
 │   └── per_channel_cast_fused.py
 ├── tileops/testing/per_channel_cast_fused.py
 ├── tests/ops/test_per_channel_cast_fused.py
+├── tests/ops/test_per_channel_cast_fused_baselines.py
 ├── workloads/per_channel_cast_fused.py
+├── benchmarks/ops/per_channel_cast_fused_baselines.py
 └── benchmarks/ops/bench_per_channel_cast_fused.py
 ```
 
@@ -56,8 +67,10 @@ TileOPs-Metax/
 | `tileops/kernels/quant/per_channel_cast_fused.py` | 真正执行设备计算的 TileLang Kernel |
 | `tileops/testing/per_channel_cast_fused.py` | 独立 PyTorch 参考实现，不调用被测 Kernel |
 | `tests/ops/test_per_channel_cast_fused.py` | 正确性、边界和异常测试 |
+| `tests/ops/test_per_channel_cast_fused_baselines.py` | 固定 TileLang 基线与 eager PyTorch 的独立一致性测试 |
 | `workloads/per_channel_cast_fused.py` | Benchmark 输入生成 |
-| `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的 TileOPs 与 PyTorch 基线 Benchmark |
+| `benchmarks/ops/per_channel_cast_fused_baselines.py` | 从官方 `dev` 源码固定的 benchmark-only TileLang 基线，C500 唯一改动为 `tile_k=64` |
+| `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的 TileOPs、固定 TileLang 与 eager PyTorch 三方 Benchmark |
 | `tileops/ops/__init__.py` | 导出四个公开 Op |
 
 调用链为：
@@ -149,17 +162,25 @@ Kernel 固定使用：
 - MetaX wavefront 大小为 64；
 - 每个 token 方向线程组使用 64 个线程。
 
-hidden tile 根据输入路径选择：
+所有路径在 MetaX C500 上统一固定：
 
 | 路径 | `tile_k` | 原因 |
 |---|---:|---|
-| BF16 plain/expand | 128 | `128 × 128 × 2 B = 32 KiB`，可容纳在 shared memory |
-| FP32 plain/expand | 64 | 避免 `128 × 128 × 4 B` 已占满 64 KiB 后再加归约 scratch |
-| FP8 rescale | 256 | FP8 staging tile 只需 `128 × 256 × 1 B = 32 KiB` |
+| BF16 plain/expand | 64 | 17,408 B shared/CTA；增加 hidden 方向并行度 |
+| FP32 plain/expand | 64 | 33,792 B shared/CTA；低于 C500 65,536 B 上限 |
+| FP8 rescale/rescale-expand | 64 | 9,216 B shared/CTA；显著降低 CTA 资源占用 |
 
-C500 每个工作组可用 shared memory 为 64 KiB。FP32 路径使用
-`tile_k = 64` 是本次迁移的重要适配：保持完整 128-token scale block，
-同时把 staging tile 控制在约 32 KiB，为归约 scratch 留出空间。
+显式 shared-memory 预算为：
+
+```text
+shared_bytes = 128 × tile_k × sizeof(input)
+             + (tile_k / 64) × 256 × sizeof(float32)
+```
+
+需要准确区分：不是所有 `tile_k=128` 都会溢出。BF16 的 128 tile 为
+34,816 B，可以容纳；但 FP32 的 128 tile 为 67,584 B，超过 C500 每个
+workgroup 的 65,536 B 上限。统一使用 64 同时解决 FP32 编译/launch 风险，
+并在已完成的 C500 A/B 中显著提高 BF16 和 FP8 路径的并行度。
 
 ### 4.2 可选 gather/expand
 
@@ -291,7 +312,8 @@ rescale 的乘法执行两次，分别服务于 amax 计算和最终量化；第
 tileops/testing/per_channel_cast_fused.py
 ```
 
-参考实现只使用 PyTorch 原语，独立完成：
+参考实现固定到上游提交 `0266ab7` 的语义，只使用 eager PyTorch 原语，
+不经过其他编译器或调用被测 TileLang Kernel。它独立完成：
 
 - QuantTensor 反量化；
 - gather/padding；
@@ -309,7 +331,7 @@ tileops/testing/per_channel_cast_fused.py
 
 ### 6.2 测试覆盖
 
-共 28 项测试，覆盖：
+主算子共 29 项测试，覆盖：
 
 - BF16 和 FP32 plain 输入；
 - FP8 e4m3 QuantTensor/rescale 输入；
@@ -330,6 +352,18 @@ tileops/testing/per_channel_cast_fused.py
 - 非法 `pos_to_token`；
 - 非法 `x_sf_invs` shape 和 dtype。
 
+另外有 7 项固定基线测试，覆盖：
+
+- 官方上游提交、TileLang 文件 SHA256 和 PyTorch 文件 SHA256 门禁；
+- 固定 `tile_k == 64`；
+- BF16、FP32、FP8 输入；
+- plain、expand、rescale、rescale-expand；
+- 正负极值、随机输入、逆序、重复和 padding position；
+- `round_sf=False/True`；
+- 固定 TileLang 基线与 eager PyTorch 的 FP8 逐元素一致性；
+- 上游式 TileLang 性能基线拒绝非完整 128-token scale block，避免把其
+  无尾块保护的适用范围误当作 TileOps 公共语义。
+
 ### 6.3 实测命令与结果
 
 环境：
@@ -345,6 +379,7 @@ python scripts/validate_manifest.py
 python scripts/validate_manifest.py \
   --check-op QuantPerChannelCastFusedOp --strict
 python -m pytest -q tests/ops/test_per_channel_cast_fused.py
+python -m pytest -q tests/ops/test_per_channel_cast_fused_baselines.py
 python -m pytest -q benchmarks/tests
 python -m pytest -q tests/test_ops_manifest.py
 ```
@@ -355,17 +390,27 @@ python -m pytest -q tests/test_ops_manifest.py
 |---|---|
 | 全量 Manifest | 通过；仓库既有 advisory warning 不阻塞 |
 | 本算子 strict Manifest | 通过；10 条 synthetic shape precondition warning |
-| 算子正确性测试 | `28 passed in 26.66s` |
-| Benchmark 基础测试 | `17 passed in 24.11s` |
-| Ops Manifest 测试 | `7 passed in 23.43s` |
+| 算子正确性测试 | `29 passed in 26.07s` |
+| 固定基线正确性测试 | `7 passed in 41.66s` |
+| Benchmark 基础测试 | `17 passed in 24.17s` |
+| Ops Manifest 测试 | `7 passed in 23.09s` |
 | Ruff check | `All checks passed!` |
-| Ruff format | `8 files already formatted` |
+| Ruff format | 通过 |
 | `py_compile` | 通过 |
 | `git diff --check` | 通过 |
+| `pre-commit` | 环境未安装，未执行 |
 
-本次没有执行 `pip install`，避免覆盖容器内的 MACA 定制 TileLang/PyTorch。
-如确需安装额外 Python 工具，应使用国内镜像并遵循夏令营指南中的
-`--no-deps` 限制。
+本次只安装了独立检查工具 `ruff==0.14.13`：
+
+```bash
+python -m pip install \
+  -i https://pypi.tuna.tsinghua.edu.cn/simple \
+  --no-deps ruff==0.14.13
+```
+
+下载源为已配置的清华/阿里云国内镜像。没有安装或覆盖 TileOps、TileLang、
+PyTorch，也没有使用会解析其依赖的安装命令。`pre-commit` 当前未安装，故以
+Ruff、`py_compile`、Manifest 和 pytest 的分项结果作为检查证据。
 
 ## 7. Benchmark 实测
 
@@ -384,6 +429,19 @@ export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
 ```
 
+三条被测路径使用完全相同的 Manifest workload 和计时协议：
+
+1. `tileops`：提交 `253fe14` 的公共 Op 和安全 Kernel。
+2. `tilelang-baseline`：固定自官方 TileKernels-Metax `dev@0266ab7` 的
+   TileLang 算法；唯一调度适配是 C500 全路径 `tile_k=64`，代码独立保存在
+   `benchmarks/ops/per_channel_cast_fused_baselines.py`，不会随生产 Kernel
+   后续优化而漂移。
+3. `torch-eager`：`tileops/testing/per_channel_cast_fused.py` 中的独立
+   eager PyTorch 原语组合。
+
+每个 case 在计时前先让 TileOps 和固定 TileLang 基线分别与 eager PyTorch
+比较；FP8 输出必须逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
+
 稳定态计时协议：
 
 - JIT 编译在计时前完成；
@@ -395,37 +453,40 @@ python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
 - 每次测量前后同步；
 - 优先使用 CUPTI kernel-only 时间；
 - 结果取三个 trial 平均值的中位数；
-- PyTorch 参考实现使用完全相同的输入和计时框架。
+- 三条路径使用完全相同的输入和计时框架。
 
 原始 Benchmark 报告生成于 `/data/profile_run.log`，未提交大型原始日志。
 其 SHA256 为：
 
 ```text
-8208fd969a2a17ac335a23231f0041075a6fcd92e9a4d3556d3f8629036f534c
+08e2ed60869bfa2c2919e872ecf8edbddc5c80b3df78cbd78b1b8351390ec1f4
 ```
 
 ### 7.2 结果
 
-| 变体与 workload | TileOPs (ms) | PyTorch ref (ms) | 加速比 | 逻辑带宽 (GB/s) |
-|---|---:|---:|---:|---:|
-| plain 128×1024 BF16 | 0.0476 | 0.0755 | 1.586× | 8.3 |
-| plain 1024×4096 BF16，rounded | 0.1399 | 0.2631 | 1.881× | 90.9 |
-| plain 4096×8192 FP32 | 1.2271 | 1.5043 | 1.226× | 137.6 |
-| expand 512×4096 → 1024 BF16 | 0.1433 | 0.3931 | 2.743× | 88.7 |
-| expand 1024×4096 → 2048 FP32，rounded | 0.3313 | 0.6579 | 1.986× | 127.4 |
-| rescale 128×1024 FP8 | 0.1565 | 0.0806 | 0.515× | 1.7 |
-| rescale 1024×4096 FP8，rounded | 0.3090 | 0.3740 | 1.210× | 28.0 |
-| rescale-expand 512×4096 → 1024 FP8 | 0.3054 | 0.4485 | 1.469× | 28.3 |
-| rescale-expand 1024×4096 → 2048 FP8，rounded | 0.4536 | 0.7920 | 1.746× | 38.2 |
+| 变体与 workload | TileOps ms | 固定 TileLang ms | eager PyTorch ms | TileOps/TileLang | TileOps/PyTorch |
+|---|---:|---:|---:|---:|---:|
+| plain 128×1024 BF16 | 0.0325 | 0.0243 | 0.0769 | 0.748× | 2.366× |
+| plain 1024×4096 BF16，rounded | 0.0705 | 0.0517 | 0.2619 | 0.733× | 3.715× |
+| plain 4096×8192 FP32 | 1.2296 | 0.8020 | 1.5036 | 0.652× | 1.223× |
+| expand 512×4096 → 1024 BF16 | 0.0756 | 0.0778 | 0.3926 | 1.029× | 5.193× |
+| expand 1024×4096 → 2048 FP32，rounded | 0.3310 | 0.3359 | 0.6582 | 1.015× | 1.989× |
+| rescale 128×1024 FP8 | 0.0549 | 0.0525 | 0.0800 | 0.956× | 1.457× |
+| rescale 1024×4096 FP8，rounded | 0.0853 | 0.0844 | 0.3731 | 0.989× | 4.374× |
+| rescale-expand 512×4096 → 1024 FP8 | 0.1259 | 0.1281 | 0.4482 | 1.017× | 3.560× |
+| rescale-expand 1024×4096 → 2048 FP8，rounded | 0.1949 | 0.1974 | 0.7917 | 1.013× | 4.062× |
 
 结论：
 
-- 9 个 workload 中 8 个快于独立 PyTorch 参考实现；
-- expand BF16 最大加速为 2.743×；
-- plain 中等规模为 1.881×；
-- 小型 FP8 rescale 只有 0.515×，主要受启动、固定调度、scale
-  读取和归约开销影响；
-- rescale 规模增大后达到 1.210×，说明小 shape 不是稳定吞吐区间。
+- 9 个 workload 全部快于 eager PyTorch，范围为 1.223×～5.193×。
+- Expand 与 Rescale-Expand 的 TileOps 安全实现比固定 TileLang 基线快
+  1.3%～2.9%；Rescale 两组相差 1.1%～4.6%，基本处于同一量级。
+- Plain 三组相对固定 TileLang 基线的吞吐低 25.2%～34.8%，对应延迟高
+  33.7%～53.3%（加速口径为 0.652×～0.748×）。固定基线只运行完整
+  128-token block，没有 TileOps 公共 Kernel 的尾块边界分支；动态 token
+  设计也不同。两项必须分别 A/B，不能直接删除安全检查。
+- 这组“三方基线”用于判断当前绝对实现质量；`tile_k=64` 相对迁移初版
+  128/256 tile 的收益见优化分析文档中的 22 组独立 A/B。
 
 ## 8. mcProfiler 实测
 
@@ -518,7 +579,10 @@ mcProfiler perf_exec \
   --single-pass
 ```
 
-### 8.3 有效报告
+### 8.3 原迁移实现有效报告
+
+下面两份报告记录提交 `967b65b` 的初始 tile 配置，作为 `tile_k=64` 优化
+前的固定 A/B 对照：
 
 | workload | 报告 |
 |---|---|
@@ -532,7 +596,7 @@ mcProfiler perf_exec \
 4b99c58344153267b4271ab0666570db6d4fe58d6946f655aa035d701362d6f6  rescale-expand
 ```
 
-### 8.4 关键指标
+### 8.4 原迁移实现关键指标
 
 | 指标 | plain medium | rescale-expand |
 |---|---:|---:|
@@ -589,6 +653,51 @@ RoofLine: cannot draw from data: 'processed_data'
 因此该次运行只用于说明“小 workload 无法满足 single-pass Roofline
 采样要求”，不作为成功 Roofline 报告引用。
 
+### 8.6 `tile_k=64` A/B 实测
+
+提交 `253fe14` 的 Kernel 与隔离 worktree 中已验证的全路径 `tile_k=64`
+候选计算代码一致。正式 A/B 使用相同输入、相同 profiler 参数，并通过
+Workgroups 数检查排除输入初始化 Kernel 污染。
+
+有效报告：
+
+```text
+33acb500f76d6d42051d99f52a22cb8f37f9b5380e2a25a26ed7ee337e59731f
+  /opt/mcProfiler-ubuntu18.04/output20260804080605/1_main_kernel.txt
+  # plain 1024x4096 BF16, tile128
+
+ba2c9873af6a2be0786e9adf0c312d1c7fd031637ace3c5ba9ecc6013d1513d3
+  /opt/mcProfiler-ubuntu18.04/output20260804132836/report.txt
+  # plain 1024x4096 BF16, tile64
+
+598bf721f99b7ce5fc26038c230d4b501d8dd9f41b6af1f48100fa425bfa97c0
+  /opt/mcProfiler-ubuntu18.04/output20260804133542/report.txt
+  # rescale 1024x4096 FP8, tile256
+
+45280caf7e0dea476083267ef336f73ebd9985076df7f5b8b87e67994f42566e
+  /opt/mcProfiler-ubuntu18.04/output20260804133241/report.txt
+  # rescale 1024x4096 FP8, tile64
+```
+
+| 指标 | Plain tile128 | Plain tile64 | Rescale tile256 | Rescale tile64 |
+|---|---:|---:|---:|---:|
+| Workgroups | 256 | 512 | 128 | 512 |
+| Waves | 1024 | 2048 | 512 | 2048 |
+| 显式 shared/CTA | 34,816 B | 17,408 B | 36,864 B | 9,216 B |
+| Average wave cycles | 13,174 | 7,618 | 37,912 | 18,551 |
+| Compute busy | 24.70% | 46.04% | 17.70% | 50.70% |
+| MTE duty | 24.70% | 45.94% | 17.66% | 50.62% |
+| STE duty | 14.34% | 11.03% | 18.42% | 45.43% |
+| VL1 hit | 96.80% | 98.42% | 96.13% | 98.43% |
+| L2 hit | 12.41% | 37.56% | 30.90% | 73.06% |
+| HBM total | 12,722,176 B | 12,765,344 B | 8,710,784 B | 8,753,600 B |
+| Shared efficiency | 100% | 67.78% | 100% | 41.19% |
+
+`tile_k=64` 的语义访存没有减少，实测 HBM 流量仅增加 0.34%～0.49%。
+收益主要来自更多 workgroup、更低 shared/CTA、更短 wave 生命周期，以及更高
+的 Compute/MTE 利用率。shared efficiency 的下降是真实现象，但并行度收益
+显著更大，因此不应退回 128/256 tile。
+
 ## 9. Roofline 实测分析
 
 ### 9.1 峰值与 sGPU 折算
@@ -624,7 +733,7 @@ Roofline 效率必须使用切片峰值计算，不能把切片实测性能直�
 全部远低于 260 FLOP/B 的 ridge point，因此四个变体均属于
 memory-bound，而不是 compute-bound。
 
-### 9.3 plain medium
+### 9.3 plain medium（原迁移 `tile_k=128`）
 
 输入：
 
@@ -666,7 +775,7 @@ Roofline efficiency
 Manifest 逻辑字节对应的 achieved bandwidth 为 132.363 GB/s；
 mcProfiler 实际流量对应 132.448 GB/s，两种口径几乎一致。
 
-### 9.4 rescale-expand
+### 9.4 rescale-expand（原迁移 `tile_k=256`）
 
 输入：
 
@@ -712,16 +821,34 @@ Roofline efficiency
 两者差异来自重复 gather 数据的缓存命中；验收 Roofline 与 Manifest
 保持同一逻辑字节口径，因此采用 12.12%。
 
-### 9.5 性能结论
+### 9.5 当前 `tile_k=64` Roofline
+
+`tile_k` 只改变调度和资源占用，不改变 Manifest 的 FLOPs、语义 bytes 或
+算术强度。按 25% sGPU 峰值 `460.8 GB/s` 重新计算：
+
+| workload | AI | 原配置效率 | `tile_k=64` 效率 | `tile_k=64` 语义带宽 |
+|---|---:|---:|---:|---:|
+| plain 1024×4096 BF16 | 0.995 FLOP/B | 19.74% | 39.10% | 180.15 GB/s |
+| rescale 1024×4096 FP8 | 2.432 FLOP/B | 6.08% | 21.92% | 101.00 GB/s |
+| plain 4096×7168 BF16 | 0.995 FLOP/B | 23.15% | 46.59% | 214.66 GB/s |
+| rescale 4096×3072 FP8 | 2.432 FLOP/B | 9.21% | 25.13% | 115.80 GB/s |
+
+最小 rescale 128×1024 的效率也由约 0.38% 提升到约 1.07%，但仍受启动
+延迟和设备覆盖不足限制，不适合单独代表稳定吞吐。
+
+### 9.6 性能结论
 
 - 所有 workload 的 AI 都显著低于 ridge point，主瓶颈是数据搬运、访存
   延迟和小规模固定开销。
-- shared-memory access efficiency 为 100%，当前 shared 布局没有观察到
-  bank conflict。
-- plain medium 的实际 HBM 流量与公式高度一致。
+- `tile_k=64` 没有改变算法 AI，提升来自并行度、occupancy 和实际搬运效率。
+- Plain/Rescale 的 shared-memory efficiency 分别降到 67.78%/41.19%，
+  表明子字宽访问存在 bank conflict；但 Compute/MTE 利用率和总性能显著
+  提升，当前不应为了 shared efficiency 退回大 tile。
+- plain medium 的实际 HBM 流量仍与公式高度一致。
 - gather/rescale 的 L2 hit 较高，缓存有效复用了重复源 token。
-- AP busy、MTE 和 STE duty 均不高，说明当前切片上仍有隐藏延迟和提高
-  并行度的空间。
+- 当前三方 Benchmark 中 Plain 仍落后于无尾块保护的固定 TileLang 基线，
+  下一步应分别验证完整块快速路径和动态 token Kernel，而不是删除公共路径
+  的尾块安全检查。
 - 小型 rescale workload 受启动和固定调度影响明显，不应仅用小 shape
   判断稳定吞吐。
 
@@ -732,22 +859,28 @@ Roofline efficiency
 2. 提供四个清晰的公开 Op，同时共用一个 TileLang Kernel。
 3. 使用编译期布尔参数生成 plain、expand、rescale 和
    rescale-expand 专用路径。
-4. 为 C500 的 64 KiB shared memory 调整 FP32 hidden tile 到 64。
+4. 为 C500 的 64 KiB shared memory 和调度效率将四条路径统一固定为
+   `tile_k=64`，并加入显式 shared-memory 字节门禁。
 5. 保持完整 128-token scale block，避免改变上游量化语义。
 6. 为 expand 尾块增加输出和源 token 边界保护。
 7. 对负 `pos_to_token` 统一产生零 padding。
 8. 加入 Kernel shape/dtype/device 缓存和输入合法性检查。
 9. 使用独立 PyTorch 参考实现建立精度证据。
-10. 增加 Manifest 驱动 Benchmark、访存公式和 Roofline 实测。
+10. 固定官方 `dev@0266ab7` 的 benchmark-only TileLang 基线和 eager
+    PyTorch 基线，并记录源文件 SHA256。
+11. 增加 Manifest 驱动三方 Benchmark、访存公式和 Roofline 实测。
 
 ## 11. 已知限制与后续优化方向
 
-- 当前 Kernel 配置为固定 tile，`tune=True` 尚无本算子的候选配置空间；
-  后续可对 `tile_k`、线程映射和不同 shape 建立 C500 autotune 配置。
-- rescale 路径中，同一 128-channel scale 会被多个 lane 使用；可评估由
-  少量 lane 读取后通过 shuffle/shared 广播，减少 load 指令。
+- 当前 Kernel 按 C500 固定 `tile_k=64`，`tune=True` 尚无本算子的候选
+  配置空间；在没有新实测证据前不重新引入 128/256 tile。
+- scale shuffle 广播已经独立 A/B，虽然正确，但稳定回退 9.74%～21.27%，
+  因此明确不采用。
 - plain 非 gather 路径是连续访存，可评估独立 `T.copy` 快速路径；任何
   改动都需要重新执行正确性、Benchmark 和 mcProfiler A/B。
+- 固定 TileLang 基线采用上游动态 token 维度，并且只运行完整 128-token
+  block；当前 Plain 差距需要把“动态 token”和“完整块无边界分支”拆成两个
+  独立实验。
 - 首次检查新的 `pos_to_token` 会执行范围校验并同步 Host；当前用有限
   cache 避免重复校验，生产模式可进一步评估可选校验策略。
 - 小 workload 不适合 mcProfiler `--single-pass` Roofline，应该选择能
@@ -763,11 +896,18 @@ python scripts/validate_manifest.py \
   --check-op QuantPerChannelCastFusedOp --strict
 
 python -m pytest -q tests/ops/test_per_channel_cast_fused.py
+python -m pytest -q tests/ops/test_per_channel_cast_fused_baselines.py
 python -m pytest -q benchmarks/tests
 python -m pytest -q tests/test_ops_manifest.py
 
 python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
 
+ruff check benchmarks/ops/bench_per_channel_cast_fused.py \
+  benchmarks/ops/per_channel_cast_fused_baselines.py \
+  tests/ops/test_per_channel_cast_fused.py \
+  tests/ops/test_per_channel_cast_fused_baselines.py \
+  tileops/kernels/quant/per_channel_cast_fused.py \
+  tileops/testing/per_channel_cast_fused.py
 git diff --check
 ```
 
@@ -780,9 +920,12 @@ git diff --check
 | TileLang Kernel | 完成 |
 | QuantTensor/FP8 输入 | 完成 |
 | plain/expand/rescale/rescale-expand | 完成 |
-| 正确性、边界、异常测试 | 28 项通过 |
-| 独立 PyTorch 基线 | 完成 |
-| Benchmark | 9 组 workload 实测完成 |
-| mcProfiler | 2 组有效报告完成 |
-| Roofline | 公式、切片折算和实测效率完成 |
+| C500 全路径 `tile_k=64` | 完成；含 shared-memory 门禁 |
+| 正确性、边界、异常测试 | 29 项通过 |
+| 固定基线测试 | 7 项通过 |
+| eager PyTorch 基线 | 完成并固定上游 SHA |
+| 官方式 TileLang 基线 | 完成；`dev@0266ab7` + C500 `tile_k=64` |
+| Benchmark | 9 组三方 workload 实测完成 |
+| mcProfiler | Plain/Rescale 优化前后 4 份 A/B 报告完成 |
+| Roofline | 公式、切片折算、原配置与 tile64 实测效率完成 |
 | MetaX C500 验证 | 完成 |
