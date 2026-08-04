@@ -28,14 +28,19 @@ _FP8_MAX = 448.0
 _MIN_AMAX = 1e-4
 
 
-def _shared_memory_bytes(tile_k: int, in_dtype: torch.dtype) -> int:
+def _shared_memory_bytes(
+    tile_k: int,
+    in_dtype: torch.dtype,
+    *,
+    register_staging: bool = False,
+) -> int:
     """Return explicit staging and reduction shared memory per workgroup."""
     if tile_k <= 0 or tile_k % _NUM_THREADS_PER_TOKEN != 0:
         raise ValueError(
             f"tile_k must be a positive multiple of {_NUM_THREADS_PER_TOKEN}, got {tile_k}"
         )
     element_bytes = torch.empty((), dtype=in_dtype).element_size()
-    staging_bytes = _NUM_PER_TOKENS * tile_k * element_bytes
+    staging_bytes = 0 if register_staging else _NUM_PER_TOKENS * tile_k * element_bytes
     reduction_bytes = (tile_k // _NUM_THREADS_PER_TOKEN) * _NUM_THREADS * 4
     return staging_bytes + reduction_bytes
 
@@ -54,6 +59,7 @@ def _per_channel_cast_fused_kernel(
     with_rescale: bool,
     with_expand: bool,
     round_sf: bool,
+    register_staging: bool,
 ):
     tile_m = _NUM_PER_TOKENS
     # Keep the hidden tile at one C500 wave. In particular, a 128x128 FP32
@@ -94,7 +100,10 @@ def _per_channel_cast_fused_kernel(
             T.ceildiv(hidden, tile_k),
             threads=_NUM_THREADS,
         ) as (pid_token, pid_hidden):
-            x_shared = T.alloc_shared((tile_m, tile_k), in_dtype)
+            if register_staging:
+                x_staging = T.alloc_local((vec_m, vec_k), in_dtype)
+            else:
+                x_shared = T.alloc_shared((tile_m, tile_k), in_dtype)
             pos_to_token_local = T.alloc_local((vec_m,), T.int32)
             sf_invs_local = T.alloc_local((vec_m,), T.float32)
             amax_local = T.alloc_local((vec_k,), T.float32)
@@ -143,7 +152,10 @@ def _per_channel_cast_fused_kernel(
                 if out_token < num_tokens_out and source_token >= 0:
                     for j in T.vectorized(vec_k):
                         in_local[j] = x[source_token, k_offset + j]
-                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = in_local[j]
+                        if register_staging:
+                            x_staging[i, j] = in_local[j]
+                        else:
+                            x_shared[m_id * vec_m + i, k_id * vec_k + j] = in_local[j]
                     for j in T.vectorized(vec_k):
                         logical_value = T.cast(in_local[j], T.float32)
                         if with_rescale:
@@ -151,7 +163,10 @@ def _per_channel_cast_fused_kernel(
                         amax_local[j] = T.max(amax_local[j], T.abs(logical_value))
                 else:
                     for j in T.vectorized(vec_k):
-                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = 0.0
+                        if register_staging:
+                            x_staging[i, j] = 0.0
+                        else:
+                            x_shared[m_id * vec_m + i, k_id * vec_k + j] = 0.0
 
             for i in T.unroll(vec_k):
                 amax_shared[i, tid] = amax_local[i]
@@ -178,7 +193,10 @@ def _per_channel_cast_fused_kernel(
             for i in T.serial(vec_m):
                 out_token = m_offset + i
                 for j in T.vectorized(vec_k):
-                    in_local[j] = x_shared[m_id * vec_m + i, k_id * vec_k + j]
+                    if register_staging:
+                        in_local[j] = x_staging[i, j]
+                    else:
+                        in_local[j] = x_shared[m_id * vec_m + i, k_id * vec_k + j]
                 for j in T.vectorized(vec_k):
                     logical_value = T.cast(in_local[j], T.float32)
                     if with_rescale:
@@ -219,7 +237,13 @@ class PerChannelCastFusedKernel(Kernel):
         self.round_sf = round_sf
         self.device = device
         self.tile_k = _TILE_K
-        self.shared_memory_bytes = _shared_memory_bytes(self.tile_k, self.dtype)
+        self.init_config(config, tune)
+        self.register_staging = self.config["register_staging"]
+        self.shared_memory_bytes = _shared_memory_bytes(
+            self.tile_k,
+            self.dtype,
+            register_staging=self.register_staging,
+        )
         if self.shared_memory_bytes > _C500_SHARED_MEMORY_LIMIT_BYTES:
             raise ValueError(
                 "per-channel fused cast shared-memory requirement exceeds "
@@ -234,6 +258,7 @@ class PerChannelCastFusedKernel(Kernel):
             with_rescale,
             with_expand,
             round_sf,
+            self.register_staging,
         )
         self._dummy_sf = None
         self._dummy_pos = None
@@ -241,11 +266,14 @@ class PerChannelCastFusedKernel(Kernel):
             self._dummy_sf = torch.empty((num_tokens, 1), dtype=torch.float32, device=device)
         if not with_expand:
             self._dummy_pos = torch.empty((1,), dtype=torch.int32, device=device)
-        self.init_config(config, tune)
 
     @property
     def default_config(self) -> dict:
-        return {}
+        # Input values remain live across the column reduction. Keeping them
+        # thread-local removes one shared-memory write/read round trip for the
+        # plain paths. Rescale retains shared staging because its FP32 input
+        # scales are live at the same time and increase register pressure.
+        return {"register_staging": not self.with_rescale}
 
     def forward(
         self,
