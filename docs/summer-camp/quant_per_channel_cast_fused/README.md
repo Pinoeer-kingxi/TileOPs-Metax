@@ -16,6 +16,12 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | TileOPs 迁移基线 | `70c85c45bd476ee53134afcd36d90a19fbf409c5` |
 | 原迁移实现提交 | `967b65b7775f9523b884bacf410bb66032c505f0` |
 | `tile_k=64` 与固定基线提交 | `253fe14e7c33e5c9851e6120d46caf78cbe3d13b` |
+| Plain/Expand thread-local staging 提交 | `6ec6bde` |
+| 测试与 profile 入口提交 | `3a0f2c0` |
+| 精确 profiler metrics runner 提交 | `ec3f87d` |
+| Rescale shared 预算门禁提交 | `c9655a2` |
+| mcProfiler 实测代码基线 | `ec3f87d6b357f9d97ab80cc49ee783ed4b4db742` |
+| 生产 Kernel SHA256 | `3b7df342a2dba2db0988210dc5aa608793cc708cc08bb35e748a1010e854d30c` |
 | 上游仓库 | `https://github.com/MetaX-MACA/TileKernels-Metax` |
 | 上游提交 | `0266ab740980de7dc03a828b8259cd73d100c2eb` |
 | 上游 TileLang 源码 | `tile_kernels/quant/per_channel_cast_fused_kernel.py` |
@@ -24,6 +30,8 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | 上游 PyTorch SHA256 | `6af7609cf7462619dd902845bc17aad5402b5fe4f3c3c8eb4a6670a4e62a481f` |
 | 仓内固定 TileLang baseline blob | `4a1c4722fd6dcd3f9fbc295ed3cb2fcbdb76d652` |
 | 仓内 eager PyTorch baseline blob | `adc604bcd8c10c06f01bc6f84f9bb79f582aa286` |
+| ACoolFIsh 最新可访问审查版本 | `497e7237546c5df4ec8056b0e423151bffbfad0c` |
+| augenstern register-resident 审查版本 | `387119e154c6cfa4d09b25823635814380af91f9` |
 | Manifest PR | https://gitlink.org.cn/ccf-ai-infra/TileOPs-Metax/pulls/29 |
 | 实测日期 | 2026-08-04 |
 | 实测设备 | MetaX C500，25% sGPU 切片 |
@@ -55,7 +63,9 @@ TileOPs-Metax/
 ├── tests/ops/test_per_channel_cast_fused_baselines.py
 ├── workloads/per_channel_cast_fused.py
 ├── benchmarks/ops/per_channel_cast_fused_baselines.py
-└── benchmarks/ops/bench_per_channel_cast_fused.py
+├── benchmarks/ops/bench_per_channel_cast_fused.py
+├── benchmarks/ops/profile_per_channel_cast_fused.py
+└── scripts/run_quant_per_channel_cast_fused.sh
 ```
 
 各文件职责如下：
@@ -69,8 +79,11 @@ TileOPs-Metax/
 | `tests/ops/test_per_channel_cast_fused.py` | 正确性、边界和异常测试 |
 | `tests/ops/test_per_channel_cast_fused_baselines.py` | 固定 TileLang 基线与 eager PyTorch 的独立一致性测试 |
 | `workloads/per_channel_cast_fused.py` | Benchmark 输入生成 |
-| `benchmarks/ops/per_channel_cast_fused_baselines.py` | 从官方 `dev` 源码固定的 benchmark-only TileLang 基线，C500 唯一改动为 `tile_k=64` |
-| `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的 TileOPs、固定 TileLang 与 eager PyTorch 三方 Benchmark |
+| `benchmarks/ops/per_channel_cast_fused_baselines.py` | 固定官方 `dev` 算法结构和语义的 benchmark-only 上游式 TileLang 基线；显式适配当前 Benchmark 接口，并在 C500 上使用 `tile_k=64` |
+| `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的生产 Kernel、shared-staging 对照、固定 TileLang 与 eager PyTorch 四方 Benchmark |
+| `benchmarks/ops/profile_per_channel_cast_fused.py` | mcProfiler 稳定驱动；固定输入构造、workgroup 期望值、commit、dirty 状态和 Kernel SHA256 |
+| `scripts/run_quant_per_channel_cast_fused.sh` | smoke、完整正确性、固定基线、Benchmark、质量门禁和 mcProfiler 的统一入口 |
+| `docs/summer-camp/quant_per_channel_cast_fused/artifacts/` | 三轮 Benchmark、最终回归和五份目标 Kernel profiler 原始文本 |
 | `tileops/ops/__init__.py` | 导出四个公开 Op |
 
 调用链为：
@@ -164,18 +177,40 @@ Kernel 固定使用：
 
 所有路径在 MetaX C500 上统一固定：
 
-| 路径 | `tile_k` | 原因 |
-|---|---:|---|
-| BF16 plain/expand | 64 | 17,408 B shared/CTA；增加 hidden 方向并行度 |
-| FP32 plain/expand | 64 | 33,792 B shared/CTA；低于 C500 65,536 B 上限 |
-| FP8 rescale/rescale-expand | 64 | 9,216 B shared/CTA；显著降低 CTA 资源占用 |
+| 路径 | `tile_k` | 输入 staging | 生产配置显式 shared/CTA |
+|---|---:|---|---:|
+| BF16 plain/expand | 64 | `T.alloc_local` thread-local | 1,024 B |
+| FP32 plain/expand | 64 | `T.alloc_local` thread-local | 1,024 B |
+| FP8 rescale/rescale-expand | 64 | `T.alloc_shared` | 9,216 B |
 
-显式 shared-memory 预算为：
+Plain 和 Expand 默认 `register_staging=True`。每线程的 32 个输入值在第一次
+amax 遍历与第二次量化遍历之间保存在 `T.alloc_local` 数组，不再写入并读回
+输入 shared tile；四条路径仍保留 1,024 B 的 `amax_shared[1, 256]` 归约
+scratch。`T.alloc_local` 表示线程私有存储，不能仅凭源码断言全部落入物理
+寄存器；是否发生 private-memory spill 以 mcProfiler 指标为准。
+
+Rescale 和 Rescale-Expand 默认 `register_staging=False`。它们还需要让每线程
+32 个 FP32 输入 scale 跨越归约保持存活；把输入也改为 thread-local 会增加
+local/private 资源压力；augenstern `387119e` 的 register-resident 消融记录了
+Rescale 回退。本仓最终三轮 A/B 没有把 Rescale-local 当作候选，因此生产路径
+保守地保留 shared staging。其显式 shared 预算为：
 
 ```text
-shared_bytes = 128 × tile_k × sizeof(input)
-             + (tile_k / 64) × 256 × sizeof(float32)
+128 × 64 × sizeof(FP8) + 256 × sizeof(FP32)
+= 8,192 + 1,024
+= 9,216 B
 ```
+
+作为单变量 A/B 的 shared-staging Plain/Expand 对照分别占用 17,408 B
+（BF16）和 33,792 B（FP32）。
+
+原迁移/上游调度的历史预算用于解释 `tile_k=64` 的选择，不是当前生产占用：
+
+| 历史路径 | tile | 显式 shared/CTA |
+|---|---:|---:|
+| BF16 plain/expand | 128 | 34,816 B |
+| FP32 plain/expand | 128 | 67,584 B |
+| FP8 rescale/rescale-expand | 256 | 36,864 B |
 
 需要准确区分：不是所有 `tile_k=128` 都会溢出。BF16 的 128 tile 为
 34,816 B，可以容纳；但 FP32 的 128 tile 为 67,584 B，超过 C500 每个
@@ -214,18 +249,20 @@ logical[t, h] = float32(x[t, h])
 
 ### 4.4 第一遍：加载和计算 amax
 
-每个工作组处理一个 `128 × tile_k` tile：
+每个工作组处理一个 `128 × 64` tile：
 
-1. 从 HBM 读取 `x`；
-2. 把原始输入写入 `x_shared`；
-3. 转为 FP32；
-4. rescale 路径乘以 `x_sf_invs`；
-5. 每个线程在寄存器中累计对应 channel 的
+1. 发起一次全局 `x` load；该 load 可能命中 VL1/L2，也可能到达 HBM；
+2. Plain/Expand 把原始输入写入每线程 `x_staging[32, 1]`；
+3. Rescale/Rescale-Expand 把原始输入写入 `x_shared[128, 64]`；
+4. 转为 FP32；
+5. rescale 路径乘以 `x_sf_invs`；
+6. 每个线程在 local 标量中累计对应 channel 的
    `max(abs(logical_value))`；
-6. 把局部 amax 写入 `amax_shared`。
+7. 把局部 amax 写入 `amax_shared`，完成跨线程归约。
 
-输入值只从 HBM 读取一次。后续量化阶段再次使用输入时，从 shared memory
-读取，不会再次读取 HBM 中的 `x`。
+源码对每个有效输出元素只发起一次全局 `x` load。后续量化阶段再次使用输入
+时，从 shared memory 或 thread-local staging 读取，不会再次发起 `x` 的全局
+load；实际到达 HBM 的 transaction 数取决于 VL1/L2 命中。
 
 ### 4.5 归约和输出 scale
 
@@ -254,7 +291,8 @@ Kernel 使用 FP32 位操作生成向上取整的 2 的幂，避免额外的高�
 
 ### 4.6 第二遍：量化并写回
 
-1. 从 `x_shared` 读取原始输入；
+1. Plain/Expand 从 `x_staging` 读取原始输入，Rescale 两条路径从
+   `x_shared` 读取；
 2. 转为 FP32；
 3. rescale 路径再次乘 `x_sf_invs`；
 4. 乘 `quant_sf`；
@@ -263,7 +301,8 @@ Kernel 使用 FP32 位操作生成向上取整的 2 的幂，避免额外的高�
 
 rescale 的乘法执行两次，分别服务于 amax 计算和最终量化；第二遍输入读取
 来自 shared memory。选择存储原始 FP8 而不是完整 FP32 logical tile，
-可以避免超过 C500 的 64 KiB shared-memory 限制。
+可以避免超过 C500 的 64 KiB shared-memory 限制。Plain/Expand 则通过
+thread-local staging 删除一次输入 shared 写和一次输入 shared 读。
 
 ## 5. 访存次数与 Roofline 字节模型
 
@@ -271,16 +310,17 @@ rescale 的乘法执行两次，分别服务于 amax 计算和最终量化；第
 
 | 访问 | plain/expand | rescale/rescale-expand |
 |---|---:|---:|
-| HBM 读取 `x` | 1 次 | 1 次 |
-| shared 写入输入 | 1 次 | 1 次 |
-| shared 读取输入 | 1 次 | 1 次 |
-| HBM 写入 FP8 `out` | 1 次 | 1 次 |
+| 全局/逻辑读取 `x` | 1 次 | 1 次 |
+| thread-local staging 写/读 | 各 1 次 | 无 |
+| shared 输入 staging 写/读 | 无 | 各 1 次 |
+| 全局/逻辑写入 FP8 `out` | 1 次 | 1 次 |
 | FP32 `x_sf_invs` | 无 | 每 token、每 128 channel 组逻辑读取一次 |
 | `pos_to_token` | expand 时每输出 token 逻辑读取一次 | expand 时每输出 token 逻辑读取一次 |
-| FP32 `out_sf` | 每 128-token block、每 channel 写 1 次 | 同左 |
+| 全局/逻辑写入 FP32 `out_sf` | 每 128-token block、每 channel 写 1 次 | 同左 |
 
-这里的 shared 读写不计入 HBM Roofline bytes。特别需要注意：Kernel 的第二遍
-输入读取来自 `x_shared`，不能把 `x` 重复计为第二次 HBM 读取。
+`amax_shared` 的归约与 reciprocal scale 广播访问在四条路径中都存在。这里的
+thread-local/shared 读写不计入 HBM Roofline bytes。特别需要注意：Kernel
+第二遍输入读取来自片上 staging，不能把 `x` 重复计为第二次 HBM 读取。
 
 ### 5.2 Manifest 公式
 
@@ -331,7 +371,7 @@ tileops/testing/per_channel_cast_fused.py
 
 ### 6.2 测试覆盖
 
-主算子共 29 项测试，覆盖：
+生产算子共 33 项测试，覆盖：
 
 - BF16 和 FP32 plain 输入；
 - FP8 e4m3 QuantTensor/rescale 输入；
@@ -342,6 +382,11 @@ tileops/testing/per_channel_cast_fused.py
 - 重复、逆序和包含 padding 的 gather；
 - 全 padding gather；
 - 输出 token 数 16、128、144、256；
+- FP32 Expand 非完整 scale block：`(153, 128) -> 160`，并启用
+  `round_sf=True`；
+- 绝对值低于 `1e-4` floor 的交替正负非零输入；
+- 大型 Plain：`(1024, 7168)`；
+- 大型 Rescale-Expand：`(513, 7168) -> 1024`；
 - 多个 token block；
 - 多个 hidden tile；
 - 空输入；
@@ -351,10 +396,15 @@ tileops/testing/per_channel_cast_fused.py
 - 非连续输入；
 - 非法 `pos_to_token`；
 - 非法 `x_sf_invs` shape 和 dtype。
+- Plain/Expand 必须启用 thread-local staging，Rescale 两条路径必须保留
+  shared staging；
+- 精确门禁 Plain/Expand 为 1,024 B、Rescale 为 9,216 B，并保留
+  BF16/FP32 shared-staging 对照和历史大 tile 预算断言。
 
 另外有 7 项固定基线测试，覆盖：
 
-- 官方上游提交、TileLang 文件 SHA256 和 PyTorch 文件 SHA256 门禁；
+- 上游提交与两个源文件 SHA256 的 provenance 元数据常量门禁；测试不联网重新
+  下载或哈希上游仓库；
 - 固定 `tile_k == 64`；
 - BF16、FP32、FP8 输入；
 - plain、expand、rescale、rescale-expand；
@@ -390,10 +440,11 @@ python -m pytest -q tests/test_ops_manifest.py
 |---|---|
 | 全量 Manifest | 通过；仓库既有 advisory warning 不阻塞 |
 | 本算子 strict Manifest | 通过；10 条 synthetic shape precondition warning |
-| 算子正确性测试 | `29 passed in 26.07s` |
-| 固定基线正确性测试 | `7 passed in 41.66s` |
-| Benchmark 基础测试 | `17 passed in 24.17s` |
-| Ops Manifest 测试 | `7 passed in 23.09s` |
+| 算子正确性测试 | `33 passed in 26.60s` |
+| 固定基线正确性测试 | `7 passed in 23.53s` |
+| Benchmark 基础测试 | `17 passed in 24.55s` |
+| Ops Manifest 测试 | `7 passed in 22.88s` |
+| 最终四方 Benchmark 回归 | `9 passed in 32.64s` |
 | Ruff check | `All checks passed!` |
 | Ruff format | 通过 |
 | `py_compile` | 通过 |
@@ -416,31 +467,38 @@ Ruff、`py_compile`、Manifest 和 pytest 的分项结果作为检查证据。
 
 ### 7.1 方法
 
-Benchmark 位于：
+Benchmark 与固定基线位于：
 
 ```text
 benchmarks/ops/bench_per_channel_cast_fused.py
+benchmarks/ops/per_channel_cast_fused_baselines.py
 ```
 
 运行命令：
 
 ```bash
 export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
-python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
+./scripts/run_quant_per_channel_cast_fused.sh benchmark
 ```
 
-三条被测路径使用完全相同的 Manifest workload 和计时协议：
+四条被测路径使用完全相同的 Manifest workload、输入和计时框架：
 
-1. `tileops`：提交 `253fe14` 的公共 Op 和安全 Kernel。
-2. `tilelang-baseline`：固定自官方 TileKernels-Metax `dev@0266ab7` 的
-   TileLang 算法；唯一调度适配是 C500 全路径 `tile_k=64`，代码独立保存在
+1. `tileops`：当前生产 Op；Plain/Expand 使用 thread-local staging，Rescale
+   两条路径使用 shared staging。
+2. `tileops-shared-staging`：仅为 Plain/Expand 构造的同 Kernel 单变量对照；
+   唯一变化是编译期 `register_staging=False`。
+3. `tilelang-baseline`：固定自官方 TileKernels-Metax `dev@0266ab7` 的
+   上游式 TileLang 算法基线。它保留核心 tile、线程映射、shared staging、
+   两遍归约/量化和动态 token 结构，并显式展开配置与 scale helper 以接入当前
+   Benchmark；C500 调度选择为全路径 `tile_k=64`。它不是上游源文件的逐字副本，
+   因此文档不把差异夸大为“只有一行 tile 修改”。该基线独立保存在
    `benchmarks/ops/per_channel_cast_fused_baselines.py`，不会随生产 Kernel
    后续优化而漂移。
-3. `torch-eager`：`tileops/testing/per_channel_cast_fused.py` 中的独立
+4. `torch-eager`：`tileops/testing/per_channel_cast_fused.py` 中的独立
    eager PyTorch 原语组合。
 
-每个 case 在计时前先让 TileOps 和固定 TileLang 基线分别与 eager PyTorch
-比较；FP8 输出必须逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
+每个 case 在计时前先让所有可用 TileLang 路径分别与 eager PyTorch 比较；
+FP8 输出必须逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
 
 稳定态计时协议：
 
@@ -452,41 +510,64 @@ python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
 - 输入总量允许时使用 3 组 clone 轮换地址；
 - 每次测量前后同步；
 - 优先使用 CUPTI kernel-only 时间；
-- 结果取三个 trial 平均值的中位数；
-- 三条路径使用完全相同的输入和计时框架。
+- 每份报告取三个 trial mean 的中位数；
+- 完整 9-workload 报告独立运行 3 次；
+- 最终交付表再取三份独立报告 latency 的中位数。
 
-原始 Benchmark 报告生成于 `/data/profile_run.log`，未提交大型原始日志。
-其 SHA256 为：
+三份原始报告已原样提交，GitHub 上可按 SHA256 复核：
 
-```text
-08e2ed60869bfa2c2919e872ecf8edbddc5c80b3df78cbd78b1b8351390ec1f4
-```
+| 运行 | 仓内原始报告 | SHA256 |
+|---|---|---|
+| run 1 | [benchmark_run1.txt](artifacts/benchmark_run1.txt) | `c8657fc39c8270dc9dfd7cd6609832426924253612dd7fb7af96000a45a92d8d` |
+| run 2 | [benchmark_run2.txt](artifacts/benchmark_run2.txt) | `802777a578097eb8dad1b30c0db35042549e71046ceed40dced19c7176490dfd` |
+| run 3 | [benchmark_run3.txt](artifacts/benchmark_run3.txt) | `08fe02d82be3be13b973bc9375bc45d93b52faae30c30e91bae2ff9671c6db8b` |
+
+文档完成后的交付回归再次得到 `9 passed in 32.64s`。该轮只用于确认最终
+代码仍能完整运行，不替换上表的三轮中位统计；原始报告为
+[benchmark_final_regression.txt](artifacts/benchmark_final_regression.txt)，
+SHA256 为 `9566cdc0f60a86153d296efe5975649eb8bba40f505803434bd857e696fff3dc`。
 
 ### 7.2 结果
 
-| 变体与 workload | TileOps ms | 固定 TileLang ms | eager PyTorch ms | TileOps/TileLang | TileOps/PyTorch |
-|---|---:|---:|---:|---:|---:|
-| plain 128×1024 BF16 | 0.0325 | 0.0243 | 0.0769 | 0.748× | 2.366× |
-| plain 1024×4096 BF16，rounded | 0.0705 | 0.0517 | 0.2619 | 0.733× | 3.715× |
-| plain 4096×8192 FP32 | 1.2296 | 0.8020 | 1.5036 | 0.652× | 1.223× |
-| expand 512×4096 → 1024 BF16 | 0.0756 | 0.0778 | 0.3926 | 1.029× | 5.193× |
-| expand 1024×4096 → 2048 FP32，rounded | 0.3310 | 0.3359 | 0.6582 | 1.015× | 1.989× |
-| rescale 128×1024 FP8 | 0.0549 | 0.0525 | 0.0800 | 0.956× | 1.457× |
-| rescale 1024×4096 FP8，rounded | 0.0853 | 0.0844 | 0.3731 | 0.989× | 4.374× |
-| rescale-expand 512×4096 → 1024 FP8 | 0.1259 | 0.1281 | 0.4482 | 1.017× | 3.560× |
-| rescale-expand 1024×4096 → 2048 FP8，rounded | 0.1949 | 0.1974 | 0.7917 | 1.013× | 4.062× |
+单位均为 ms。`N/A` 表示 Rescale 生产路径本身就是 shared staging，不构造
+没有单变量意义的重复对照。
+
+| 变体与 workload | production | shared staging | 固定 TileLang | eager PyTorch |
+|---|---:|---:|---:|---:|
+| plain 128×1024 BF16 | 0.0314 | 0.0325 | 0.0243 | 0.0748 |
+| plain 1024×4096 BF16，rounded | 0.0507 | 0.0705 | 0.0520 | 0.2618 |
+| plain 4096×8192 FP32 | 0.2852 | 1.2286 | 0.7889 | 1.5036 |
+| expand 512×4096 → 1024 BF16 | 0.0513 | 0.0754 | 0.0778 | 0.3931 |
+| expand 1024×4096 → 2048 FP32，rounded | 0.0862 | 0.3322 | 0.3374 | 0.6570 |
+| rescale 128×1024 FP8 | 0.0546 | N/A | 0.0526 | 0.0801 |
+| rescale 1024×4096 FP8，rounded | 0.0851 | N/A | 0.0845 | 0.3731 |
+| rescale-expand 512×4096 → 1024 FP8 | 0.1259 | N/A | 0.1282 | 0.4485 |
+| rescale-expand 1024×4096 → 2048 FP8，rounded | 0.1972 | N/A | 0.1972 | 0.7908 |
+
+### 7.3 thread-local staging 单变量 A/B
+
+| workload | shared ms | production ms | 加速 | 延迟下降 |
+|---|---:|---:|---:|---:|
+| plain 128×1024 BF16 | 0.0325 | 0.0314 | 1.035× | 3.38% |
+| plain 1024×4096 BF16 rounded | 0.0705 | 0.0507 | 1.391× | 28.09% |
+| plain 4096×8192 FP32 | 1.2286 | 0.2852 | 4.308× | 76.78% |
+| expand 512×4096 → 1024 BF16 | 0.0754 | 0.0513 | 1.470× | 31.96% |
+| expand 1024×4096 → 2048 FP32 rounded | 0.3322 | 0.0862 | 3.854× | 74.05% |
 
 结论：
 
-- 9 个 workload 全部快于 eager PyTorch，范围为 1.223×～5.193×。
-- Expand 与 Rescale-Expand 的 TileOps 安全实现比固定 TileLang 基线快
-  1.3%～2.9%；Rescale 两组相差 1.1%～4.6%，基本处于同一量级。
-- Plain 三组相对固定 TileLang 基线的吞吐低 25.2%～34.8%，对应延迟高
-  33.7%～53.3%（加速口径为 0.652×～0.748×）。固定基线只运行完整
-  128-token block，没有 TileOps 公共 Kernel 的尾块边界分支；动态 token
-  设计也不同。两项必须分别 A/B，不能直接删除安全检查。
-- 这组“三方基线”用于判断当前绝对实现质量；`tile_k=64` 相对迁移初版
-  128/256 tile 的收益见优化分析文档中的 22 组独立 A/B。
+- 生产配置在 9 个 workload 上全部快于 eager PyTorch，范围为
+  1.467×～7.663×。
+- thread-local staging 对五组 Plain/Expand 均无回退；中大型 BF16 延迟下降
+  约 28%～32%，FP32 延迟下降约 74%～77%。
+- 最小 Plain 只有 16 个 workgroup，固定启动成本占主导；生产配置仍比固定 TileLang
+  慢约 29%，不能再概括为所有 Plain workload 都落后 25%～35%。中大型
+  Plain 已持平或显著超过固定 TileLang。
+- Rescale 两条路径保留 shared staging，与固定 TileLang 基本持平；augenstern
+  分支已记录 local/register 消融回退，而本仓尚无可复核的 Rescale-local
+  单变量报告，因此不把该候选带入生产路径。
+- 固定 TileLang 仍是独立的上游算法基线；shared-staging 则是用于归因
+  thread-local staging 收益的单变量对照，两者用途不同。
 
 ## 8. mcProfiler 实测
 
@@ -508,349 +589,191 @@ python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
 | C500 shared memory/workgroup | 64 KiB |
 | wavefront | 64 |
 
-### 8.2 可复现 profiling 入口
+### 8.2 采样入口与数据隔离
 
-可使用下面的最小驱动脚本分别运行两个 workload：
+稳定驱动位于：
 
-```python
-# /tmp/profile_per_channel_cast_fused.py
-import argparse
-
-import torch
-
-from tileops.ops import (
-    QuantPerChannelCastFusedOp,
-    QuantPerChannelCastFusedRescaleExpandOp,
-)
-from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--case", choices=("plain-medium", "rescale-expand"), required=True)
-args = parser.parse_args()
-
-torch.manual_seed(1235)
-torch.cuda.manual_seed_all(1235)
-
-if args.case == "plain-medium":
-    workload = PerChannelCastFusedWorkload(
-        (1024, 4096),
-        torch.bfloat16,
-        round_sf=True,
-    )
-    op = QuantPerChannelCastFusedOp(round_sf=True)
-else:
-    workload = PerChannelCastFusedWorkload(
-        (512, 4096),
-        torch.float8_e4m3fn,
-        with_rescale=True,
-        with_expand=True,
-        num_tokens_out=1024,
-    )
-    op = QuantPerChannelCastFusedRescaleExpandOp()
-
-inputs = workload.gen_inputs()
-for _ in range(30):
-    op(*inputs)
-torch.cuda.synchronize()
-
-op(*inputs)
-torch.cuda.synchronize()
+```text
+benchmarks/ops/profile_per_channel_cast_fused.py
 ```
 
-命令：
+驱动固定 workload、输入构造和目标调用，并在执行前打印 commit、dirty
+状态、Kernel SHA256、期望 workgroups、staging 策略和显式 shared bytes：
+
+| case | workload | staging | 期望 workgroups | shared/CTA |
+|---|---|---|---:|---:|
+| `plain-medium` | Plain 1024×4096 BF16，rounded | production | 512 | 1,024 B |
+| `plain-medium` | Plain 1024×4096 BF16，rounded | shared | 512 | 17,408 B |
+| `expand-medium` | Expand 512×4096 → 1024 BF16 | production | 512 | 1,024 B |
+| `expand-medium` | Expand 512×4096 → 1024 BF16 | shared | 512 | 17,408 B |
+| `rescale-control` | Rescale 1024×4096 FP8，rounded | production | 512 | 9,216 B |
+
+固定 runner 命令为：
 
 ```bash
 export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 
-mcProfiler perf_exec \
-  --cmdline "python /tmp/profile_per_channel_cast_fused.py --case plain-medium" \
-  --cwd /data/TileOPs-Metax \
-  --kernelname main_kernel \
-  --casename quant_plain_medium \
-  --counts 1 \
-  --single-pass
-
-mcProfiler perf_exec \
-  --cmdline "python /tmp/profile_per_channel_cast_fused.py --case rescale-expand" \
-  --cwd /data/TileOPs-Metax \
-  --kernelname main_kernel \
-  --casename quant_rescale_expand \
-  --counts 1 \
-  --single-pass
+./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium production
+./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium shared
+./scripts/run_quant_per_channel_cast_fused.sh profile expand-medium production
+./scripts/run_quant_per_channel_cast_fused.sh profile expand-medium shared
+./scripts/run_quant_per_channel_cast_fused.sh profile rescale-control production
 ```
 
-### 8.3 原迁移实现有效报告
-
-下面两份报告记录提交 `967b65b` 的初始 tile 配置，作为 `tile_k=64` 优化
-前的固定 A/B 对照：
-
-| workload | 报告 |
-|---|---|
-| plain 1024×4096 BF16 rounded | `/opt/mcProfiler-ubuntu18.04/output20260804080605/1_main_kernel.txt` |
-| rescale-expand 512×4096 → 1024 FP8 | `/opt/mcProfiler-ubuntu18.04/output20260804080829/1_main_kernel.txt` |
-
-报告 SHA256：
+runner 使用明确的 metrics 列表并让 mcProfiler 分多个 event batch 精确采样。
+生成的 `mcProfiler.json` 过滤条件为：
 
 ```text
-33acb500f76d6d42051d99f52a22cb8f37f9b5380e2a25a26ed7ee337e59731f  plain
-4b99c58344153267b4271ab0666570db6d4fe58d6946f655aa035d701362d6f6  rescale-expand
+kernelnames  = ["main_kernel"]
+include      = true
+is_perkernel = true
+counts       = 2
 ```
 
-### 8.4 原迁移实现关键指标
+这里 `counts=2` 包含 aggregate 和 1 次目标 Kernel 记录。每次结果都以
+512 workgroups、2,048 waves 作为目标 Kernel 身份门禁。
 
-| 指标 | plain medium | rescale-expand |
-|---|---:|---:|
-| Workgroups | 256 | 128 |
-| Waves | 1024 | 512 |
-| Kernel cycles | 108061 | 174296 |
-| Kernel duration | 96.054 μs | 154.930 μs |
-| AP busy | 13.92% | 17.80% |
-| Compute instructions busy | 24.70% | 21.83% |
-| MTE duty | 24.70% | 21.73% |
-| STE duty | 14.34% | 20.22% |
-| VL1 hit | 96.80% | 96.08% |
-| L2 hit | 12.41% | 46.08% |
-| Shared-memory efficiency | 100% | 100% |
-| HBM read | 8,404,992 B | 2,213,888 B |
-| HBM write | 4,317,184 B | 4,325,376 B |
-| 实测 HBM 总流量 | 12,722,176 B | 6,539,264 B |
-| mcProfiler 实测带宽 | 132.448 GB/s | 42.208 GB/s |
+只引用每个输出目录中的 `1_main_kernel.txt`。顶层 `report.txt` 聚合了
+驱动中的 `torch.ones`、`torch.arange`、Host-to-device 初始化等 Kernel；
+例如 Expand production 的 `report.txt` 为 768 workgroups、6,144 waves，
+而 `1_main_kernel.txt` 才是目标 Kernel 的 512 workgroups、2,048 waves。
+因此不能用 `report.txt` 的 HBM、workgroup 或 RoofLine 数据评价本算子。
 
-plain workload 的 Manifest 逻辑字节数为 12,713,984 B，与 mcProfiler
-实测 12,722,176 B 只差 8,192 B，差异约 0.064%，说明访存模型与实际
-HBM 流量基本一致。
+### 8.3 最终报告与 SHA256
 
-rescale-expand 的写流量：
+| case | staging | 仓内目标 Kernel 报告 | mcProfiler 输出目录 |
+|---|---|---|---|
+| Plain medium | shared | [mcprofiler_plain_shared.txt](artifacts/mcprofiler_plain_shared.txt) | `output20260804171933` |
+| Plain medium | production | [mcprofiler_plain_production.txt](artifacts/mcprofiler_plain_production.txt) | `output20260804170503` |
+| Expand medium | shared | [mcprofiler_expand_shared.txt](artifacts/mcprofiler_expand_shared.txt) | `output20260804170841` |
+| Expand medium | production | [mcprofiler_expand_production.txt](artifacts/mcprofiler_expand_production.txt) | `output20260804171217` |
+| Rescale control | production | [mcprofiler_rescale_production.txt](artifacts/mcprofiler_rescale_production.txt) | `output20260804171558` |
 
 ```text
-FP8 out   = 1024 × 4096 × 1 = 4,194,304 B
-FP32 sf   =    8 × 4096 × 4 =   131,072 B
-total     =                       4,325,376 B
+e6703fe9f2f17e82771ea1337d4a5d7bc72f710292442d390a549c7057f1b60f
+  artifacts/mcprofiler_plain_shared.txt
+577a203009afdbc9c234ff4b309584a72ec9a174ce40c23a5e2ad2141e0f2a3e
+  artifacts/mcprofiler_plain_production.txt
+871b4086dccf93fd41db24271b2a535362aee6639b4b07092ffdeaa44ee9e0be
+  artifacts/mcprofiler_expand_shared.txt
+e35974d3011c18da534bf90451940211c06faeb7c021e67443d1fbffaf7cd198
+  artifacts/mcprofiler_expand_production.txt
+adc21ab9605e765aad0ec44baf10fad3cde94c1999699188fe8e373dd758b3ee
+  artifacts/mcprofiler_rescale_production.txt
 ```
 
-与 mcProfiler 的 HBM write 完全一致。
+### 8.4 multi-batch、per-kernel 指标
 
-该 workload 只包含 512 个源 token，却产生 1024 个输出 token，同一源数据
-会被 gather 两次，并且 `pos_to_token[::17]` 为 padding。Manifest 按每个
-逻辑输出读取计数，而实际重复读取部分被 L2/VL1 缓存吸收，因此实测 HBM
-read 低于逻辑公式；46.08% 的 L2 hit 也支持这一解释。
+下表的 `AP busy / during` 是 mcProfiler RoofLine
+`processed_data.during` 的原始 cycle 计数，不是百分比。S 表示 shared
+staging，P 表示 production。
 
-### 8.5 小 workload 限制
+| 指标 | Plain S | Plain P | Expand S | Expand P | Rescale P |
+|---|---:|---:|---:|---:|---:|
+| Workgroups | 512 | 512 | 512 | 512 | 512 |
+| Waves | 2,048 | 2,048 | 2,048 | 2,048 | 2,048 |
+| 显式 shared/CTA | 17,408 B | 1,024 B | 17,408 B | 1,024 B | 9,216 B |
+| Average wave cycles | 9,548.75 | 11,242.30 | 10,321.08 | 11,427.86 | 17,190.72 |
+| AP busy / during | 77,231 | 55,324 | 84,562 | 57,347 | 79,659 |
+| Shared load instructions | 68,272 | 4,016 | 68,272 | 4,016 | 68,408 |
+| Shared store instructions | 66,766 | 2,510 | 66,766 | 2,510 | 66,899 |
+| Private read instructions | 0 | 0 | 0 | 0 | 0 |
+| Private write instructions | 0 | 0 | 0 | 0 | 0 |
+| VL1 hit | 98.42% | 98.42% | 98.41% | 98.41% | 98.43% |
+| L2 hit | 38.70% | 25.76% | 62.69% | 50.38% | 74.09% |
+| HBM read | 8,438,752 B | 8,429,216 B | 4,248,032 B | 4,241,824 B | 4,428,896 B |
+| HBM write | 4,327,232 B | 4,325,696 B | 4,328,256 B | 4,325,952 B | 4,325,760 B |
+| HBM total | 12,765,984 B | 12,754,912 B | 8,576,288 B | 8,567,776 B | 8,754,656 B |
+| Shared access efficiency | 67.76% | 100% | 75.52% | 100% | 41.22% |
+| hardware `case_I` | 159.729 | 148.183 | 237.690 | 219.647 | 324.795 |
+| hardware `case_bandwith` (GB/s) | 185.958 | 259.368 | 114.098 | 168.078 | 123.639 |
 
-对 plain 128×1024 BF16 也运行了 single-pass profiler：
+### 8.5 mcProfiler 结论
 
-```text
-/opt/mcProfiler-ubuntu18.04/output20260804081122/1_main_kernel.txt
-```
-
-该 workload 只有 8 个 workgroup、32 个 wave，未充分覆盖设备。
-mcProfiler 报告：
-
-```text
-RoofLine: cannot draw from data: 'processed_data'
-```
-
-因此该次运行只用于说明“小 workload 无法满足 single-pass Roofline
-采样要求”，不作为成功 Roofline 报告引用。
-
-### 8.6 `tile_k=64` A/B 实测
-
-提交 `253fe14` 的 Kernel 与隔离 worktree 中已验证的全路径 `tile_k=64`
-候选计算代码一致。正式 A/B 使用相同输入、相同 profiler 参数，并通过
-Workgroups 数检查排除输入初始化 Kernel 污染。
-
-有效报告：
-
-```text
-33acb500f76d6d42051d99f52a22cb8f37f9b5380e2a25a26ed7ee337e59731f
-  /opt/mcProfiler-ubuntu18.04/output20260804080605/1_main_kernel.txt
-  # plain 1024x4096 BF16, tile128
-
-ba2c9873af6a2be0786e9adf0c312d1c7fd031637ace3c5ba9ecc6013d1513d3
-  /opt/mcProfiler-ubuntu18.04/output20260804132836/report.txt
-  # plain 1024x4096 BF16, tile64
-
-598bf721f99b7ce5fc26038c230d4b501d8dd9f41b6af1f48100fa425bfa97c0
-  /opt/mcProfiler-ubuntu18.04/output20260804133542/report.txt
-  # rescale 1024x4096 FP8, tile256
-
-45280caf7e0dea476083267ef336f73ebd9985076df7f5b8b87e67994f42566e
-  /opt/mcProfiler-ubuntu18.04/output20260804133241/report.txt
-  # rescale 1024x4096 FP8, tile64
-```
-
-| 指标 | Plain tile128 | Plain tile64 | Rescale tile256 | Rescale tile64 |
-|---|---:|---:|---:|---:|
-| Workgroups | 256 | 512 | 128 | 512 |
-| Waves | 1024 | 2048 | 512 | 2048 |
-| 显式 shared/CTA | 34,816 B | 17,408 B | 36,864 B | 9,216 B |
-| Average wave cycles | 13,174 | 7,618 | 37,912 | 18,551 |
-| Compute busy | 24.70% | 46.04% | 17.70% | 50.70% |
-| MTE duty | 24.70% | 45.94% | 17.66% | 50.62% |
-| STE duty | 14.34% | 11.03% | 18.42% | 45.43% |
-| VL1 hit | 96.80% | 98.42% | 96.13% | 98.43% |
-| L2 hit | 12.41% | 37.56% | 30.90% | 73.06% |
-| HBM total | 12,722,176 B | 12,765,344 B | 8,710,784 B | 8,753,600 B |
-| Shared efficiency | 100% | 67.78% | 100% | 41.19% |
-
-`tile_k=64` 的语义访存没有减少，实测 HBM 流量仅增加 0.34%～0.49%。
-收益主要来自更多 workgroup、更低 shared/CTA、更短 wave 生命周期，以及更高
-的 Compute/MTE 利用率。shared efficiency 的下降是真实现象，但并行度收益
-显著更大，因此不应退回 128/256 tile。
+- Plain production 相对 shared 将 shared load 从 68,272 降到 4,016，
+  shared store 从 66,766 降到 2,510；AP busy/during 下降 28.37%，硬件
+  `case_bandwith` 提高 1.395×。
+- Expand production 的 shared 指令下降幅度相同；AP busy/during 下降
+  32.18%，硬件 `case_bandwith` 提高 1.473×。
+- 两组 A/B 的 HBM 总流量变化都小于 0.1%，说明收益不是减少语义 HBM
+  访问，而是删除输入 tile 的 shared 往返并降低每 CTA 资源占用。
+- 五份报告的 private read/write 都为 0，当前选定 workload 没有观察到
+  thread-local staging spill 到 profiler 可见的 private memory。
+- production 的 Average wave cycles 略高，但总 AP busy/during 明显降低；
+  单 wave 生命周期不能替代完整 Kernel 延迟或吞吐指标。
+- Rescale 仍有约 6.8 万次 shared load/store，且 shared efficiency 为
+  41.22%，与生产路径有意保留 shared staging 一致。是否改用 local 必须另做
+  资源压力和 spill A/B，不能从 Plain/Expand 结果外推。
+- mcProfiler 的 `case_I` 和 `case_bandwith` 来自硬件指令与 memory
+  transaction 口径，只用于同一 profiler 配置下的 A/B，不与下一节的
+  Manifest FLOPs、语义 bytes 或算术强度混用。
 
 ## 9. Roofline 实测分析
 
-### 9.1 峰值与 sGPU 折算
+### 9.1 口径与峰值参考
 
-mcProfiler 给出的整卡 Roofline 参数：
-
-| 参数 | 整卡 |
-|---|---:|
-| HBM 峰值带宽 | 1843.2 GB/s |
-| Ridge point | 260 FLOP/B |
-| 推导计算峰值 | 479.232 TFLOP/s |
-
-当前容器使用 25% Compute、16000 MiB 的 sGPU 切片。按配额线性折算：
-
-| 参数 | 25% sGPU |
-|---|---:|
-| HBM 峰值带宽 | 460.8 GB/s |
-| 计算峰值 | 119.808 TFLOP/s |
-| Ridge point | 260 FLOP/B |
-
-Roofline 效率必须使用切片峰值计算，不能把切片实测性能直接除以整卡峰值。
-
-### 9.2 算术强度
-
-各 workload 的 Manifest 算术强度范围为：
-
-| 类型 | 典型 AI |
-|---|---:|
-| BF16 plain/expand | 约 0.995 FLOP/B |
-| FP32 plain/expand | 约 0.599 FLOP/B |
-| FP8 rescale/rescale-expand | 约 2.431 FLOP/B |
-
-全部远低于 260 FLOP/B 的 ridge point，因此四个变体均属于
-memory-bound，而不是 compute-bound。
-
-### 9.3 plain medium（原迁移 `tile_k=128`）
-
-输入：
+Roofline 使用第 5 节 Manifest 公式和第 7 节三次独立 Benchmark 的中位延迟：
 
 ```text
-N = 1024
-H = 4096
-S = 8
-e = 2 B
+Manifest AI             = Manifest FLOPs / Manifest semantic bytes
+achieved TFLOP/s        = Manifest FLOPs / benchmark latency
+semantic bandwidth      = Manifest semantic bytes / benchmark latency
+full-card reference     = semantic bandwidth / 1843.2 GB/s
+25% linear reference    = semantic bandwidth / 460.8 GB/s
 ```
 
-计算：
+mcProfiler 报告的整卡参数为 1,843.2 GB/s HBM 峰值和 260 FLOP/B ridge
+point。当前环境分配 25% Compute，但没有经过校准的 sGPU HBM 带宽上限。
+`460.8 GB/s = 1843.2 × 25%` 只是未校准的线性参考线，不是实际切片峰值。
 
-```text
-FLOPs = 3 × 1024 × 4096 + 2 × 8 × 4096
-      = 12,648,448
+尤其要注意，表中的 bandwidth 由 Manifest 语义字节数计算。Expand 的重复
+gather 可被 cache 复用，因此语义字节可能显著大于物理 HBM transaction。
+所以两列百分比都只是量纲一致的归一化参考，不是物理 HBM 利用率、效率或
+下界。超过 100% 只说明不能把“Manifest 语义流量”和“Compute 配额线性折算的
+HBM 峰值”组合成效率指标；它本身不能校准或证明切片的物理带宽策略。
 
-Bytes = 1024 × 4096 × 2
-      + 1024 × 4096
-      + 8 × 4096 × 4
-      = 12,713,984 B
+### 9.2 三轮 Benchmark 语义 Roofline
 
-AI = 12,648,448 / 12,713,984
-   = 0.994845 FLOP/B
-```
+| production workload | Manifest AI (FLOP/B) | achieved TFLOP/s | semantic BW (GB/s) | semantic BW / 1843.2 | semantic BW / 460.8 |
+|---|---:|---:|---:|---:|---:|
+| Plain 128×1024 BF16 | 0.994845 | 0.0126 | 12.65 | 0.69% | 2.75% |
+| Plain 1024×4096 BF16，rounded | 0.994845 | 0.2495 | 250.77 | 13.61% | 54.42% |
+| Plain 4096×8192 FP32 | 0.599379 | 0.3548 | 591.94 | 32.11% | 128.46% |
+| Expand 512×4096 → 1024 BF16 | 0.994525 | 0.2466 | 247.92 | 13.45% | 53.80% |
+| Expand 1024×4096 → 2048 FP32，rounded | 0.599263 | 0.2935 | 489.71 | 26.57% | 106.27% |
+| Rescale 128×1024 FP8 | 2.431818 | 0.0120 | 4.95 | 0.27% | 1.07% |
+| Rescale 1024×4096 FP8，rounded | 2.431818 | 0.2472 | 101.65 | 5.52% | 22.06% |
+| Rescale-Expand 512×4096 → 1024 FP8 | 2.430667 | 0.1671 | 68.74 | 3.73% | 14.92% |
+| Rescale-Expand 1024×4096 → 2048 FP8，rounded | 2.430667 | 0.2134 | 87.78 | 4.76% | 19.05% |
 
-使用 25% sGPU 带宽峰值：
+### 9.3 解释与结论
 
-```text
-memory roof       = 0.994845 × 460.8 GB/s
-                  = 0.458425 TFLOP/s
-ideal memory time = 12,713,984 / 460.8 GB/s
-                  = 27.591 μs
-measured time     = 96.054 μs
-Roofline efficiency
-                  = 27.591 / 96.054
-                  = 28.72%
-```
-
-Manifest 逻辑字节对应的 achieved bandwidth 为 132.363 GB/s；
-mcProfiler 实际流量对应 132.448 GB/s，两种口径几乎一致。
-
-### 9.4 rescale-expand（原迁移 `tile_k=256`）
-
-输入：
-
-```text
-source tokens = 512
-N output      = 1024
-H             = 4096
-C             = 32
-S             = 8
-```
-
-计算：
-
-```text
-FLOPs = 5 × 1024 × 4096 + 2 × 8 × 4096
-      = 21,037,056
-
-Bytes = 2 × 1024 × 4096
-      + 4 × 1024 × 32
-      + 4 × 1024
-      + 4 × 8 × 4096
-      = 8,654,848 B
-
-AI = 21,037,056 / 8,654,848
-   = 2.430667 FLOP/B
-```
-
-使用 25% sGPU 带宽峰值：
-
-```text
-memory roof       = 2.430667 × 460.8 GB/s
-                  = 1.120051 TFLOP/s
-ideal memory time = 8,654,848 / 460.8 GB/s
-                  = 18.782 μs
-measured time     = 154.930 μs
-Roofline efficiency
-                  = 18.782 / 154.930
-                  = 12.12%
-```
-
-按 Manifest 逻辑流量计算的 achieved bandwidth 为 55.863 GB/s。
-按 mcProfiler 实际 HBM 流量计算为 42.208 GB/s，约为切片峰值的 9.16%。
-两者差异来自重复 gather 数据的缓存命中；验收 Roofline 与 Manifest
-保持同一逻辑字节口径，因此采用 12.12%。
-
-### 9.5 当前 `tile_k=64` Roofline
-
-`tile_k` 只改变调度和资源占用，不改变 Manifest 的 FLOPs、语义 bytes 或
-算术强度。按 25% sGPU 峰值 `460.8 GB/s` 重新计算：
-
-| workload | AI | 原配置效率 | `tile_k=64` 效率 | `tile_k=64` 语义带宽 |
-|---|---:|---:|---:|---:|
-| plain 1024×4096 BF16 | 0.995 FLOP/B | 19.74% | 39.10% | 180.15 GB/s |
-| rescale 1024×4096 FP8 | 2.432 FLOP/B | 6.08% | 21.92% | 101.00 GB/s |
-| plain 4096×7168 BF16 | 0.995 FLOP/B | 23.15% | 46.59% | 214.66 GB/s |
-| rescale 4096×3072 FP8 | 2.432 FLOP/B | 9.21% | 25.13% | 115.80 GB/s |
-
-最小 rescale 128×1024 的效率也由约 0.38% 提升到约 1.07%，但仍受启动
-延迟和设备覆盖不足限制，不适合单独代表稳定吞吐。
-
-### 9.6 性能结论
-
-- 所有 workload 的 AI 都显著低于 ridge point，主瓶颈是数据搬运、访存
-  延迟和小规模固定开销。
-- `tile_k=64` 没有改变算法 AI，提升来自并行度、occupancy 和实际搬运效率。
-- Plain/Rescale 的 shared-memory efficiency 分别降到 67.78%/41.19%，
-  表明子字宽访问存在 bank conflict；但 Compute/MTE 利用率和总性能显著
-  提升，当前不应为了 shared efficiency 退回大 tile。
-- plain medium 的实际 HBM 流量仍与公式高度一致。
-- gather/rescale 的 L2 hit 较高，缓存有效复用了重复源 token。
-- 当前三方 Benchmark 中 Plain 仍落后于无尾块保护的固定 TileLang 基线，
-  下一步应分别验证完整块快速路径和动态 token Kernel，而不是删除公共路径
-  的尾块安全检查。
-- 小型 rescale workload 受启动和固定调度影响明显，不应仅用小 shape
-  判断稳定吞吐。
+- 九组 Manifest AI 为 0.599263～2.431818 FLOP/B，说明算法语义的计算/搬运
+  比很低，优化应优先关注数据路径；小 workload 还受启动延迟和设备覆盖不足
+  影响。Manifest AI 与 mcProfiler 的硬件 `MAX_I` 计数定义不同，不能仅凭
+  `0.599～2.432 < 260` 把九组 workload 严格分类为硬件 memory-bound。
+- Plain/Expand 的 thread-local staging 不改变 Manifest FLOPs、语义 bytes
+  或 AI；收益体现在同等语义工作量下更高的 achieved TFLOP/s 和 semantic
+  bandwidth，并由第 8 节的 shared 指令下降提供硬件侧佐证。
+- 25% 线性参考列仅展示归一化结果：两组 FP32 workload 达到 106.27% 和
+  128.46%，不能解释为超过物理峰值、物理利用率超过 100%，或切片策略证据。
+- 表中 bandwidth 是 Benchmark 延迟下的 Manifest 语义带宽，不是
+  mcProfiler 的 `case_bandwith`。同理，Manifest AI 不能与硬件
+  `case_I=148.183～324.795` 比较；两套计数回答不同问题。
+- Plain medium 的 Manifest 逻辑流量为 12,713,984 B，production profiler
+  的物理 HBM 流量为 12,754,912 B，两者接近。连续 Plain 的语义带宽与物理
+  流量具有较好的对应关系。
+- Expand medium 的 Manifest 逻辑流量为 12,718,080 B，而 production
+  profiler 的物理 HBM 流量为 8,567,776 B。Expand 会重复 gather 源 token，
+  Manifest 按每个逻辑输出计入读取，硬件则通过 VL1/L2 复用，因此两者差异
+  是预期的，不能据此修改语义 bytes 公式。
+- 对五份已采样报告，mcProfiler 自己的硬件口径给出 Plain/Expand
+  `case_I=148.183～237.690 < 260`，位于其 memory-side；Rescale control
+  `case_I=324.795 > 260`，位于其 compute-side。这个结论只适用于对应的五份
+  Kernel 报告，不能外推到未 profile 的全部九组 workload。
+- 当前最强的中大型 Plain/Expand 已达到 247.92～591.94 GB/s 语义带宽；
+  Rescale 路径因额外 scale 读取、二次乘法和 shared staging，仍是后续
+  独立优化重点。
 
 ## 10. 本次迁移中的适配与修复
 
@@ -861,55 +784,70 @@ Roofline efficiency
    rescale-expand 专用路径。
 4. 为 C500 的 64 KiB shared memory 和调度效率将四条路径统一固定为
    `tile_k=64`，并加入显式 shared-memory 字节门禁。
-5. 保持完整 128-token scale block，避免改变上游量化语义。
-6. 为 expand 尾块增加输出和源 token 边界保护。
-7. 对负 `pos_to_token` 统一产生零 padding。
-8. 加入 Kernel shape/dtype/device 缓存和输入合法性检查。
-9. 使用独立 PyTorch 参考实现建立精度证据。
-10. 固定官方 `dev@0266ab7` 的 benchmark-only TileLang 基线和 eager
+5. 按变体采用混合 staging：Plain/Expand 使用 thread-local staging，
+   Rescale/Rescale-Expand 因 scale 生命周期和 local/private 压力保留 shared。
+6. 保持完整 128-token scale block，避免改变上游量化语义。
+7. 为 expand 尾块增加输出和源 token 边界保护。
+8. 对负 `pos_to_token` 统一产生零 padding；对非负越界索引明确报错。
+9. 加入 Kernel shape/dtype/device 缓存和输入合法性检查。
+10. 使用独立 PyTorch 参考实现建立精度证据。
+11. 固定官方 `dev@0266ab7` 的 benchmark-only TileLang 基线和 eager
     PyTorch 基线，并记录源文件 SHA256。
-11. 增加 Manifest 驱动三方 Benchmark、访存公式和 Roofline 实测。
+12. 增加 Manifest 驱动四方 Benchmark，使用 shared-staging 单变量对照归因
+    thread-local staging 收益。
+13. 增加稳定 profile driver 与一键 runner，打印 commit、dirty、Kernel
+    SHA256、期望 workgroups 和显式 shared bytes，并指定精确 profiler metrics。
+14. 审查 ACoolFIsh `497e723` 与 augenstern `387119e`；仅吸收经过当前
+    Kernel 独立 A/B 的优化，不整体替换现有接口、校验和测试结构。
 
 ## 11. 已知限制与后续优化方向
 
 - 当前 Kernel 按 C500 固定 `tile_k=64`，`tune=True` 尚无本算子的候选
   配置空间；在没有新实测证据前不重新引入 128/256 tile。
-- scale shuffle 广播已经独立 A/B，虽然正确，但稳定回退 9.74%～21.27%，
-  因此明确不采用。
+- 当前生产 Kernel cache key 仍包含精确 token 维度；动态 token Kernel 是
+  后续独立实验，不能与 staging、边界分支或接口变更混在同一次 A/B 中。
+- `T.alloc_local` 只保证线程私有语义，可能映射到物理寄存器或 private
+  memory；性能结论必须同时检查 private read/write 与 spill 证据。
+- Rescale/Rescale-Expand 的 register staging 已明确禁用；其输入 scale 与
+  输入值同时跨归约存活会增加 local/private 压力，现阶段 shared 更稳定。
+- 旧的标量 lane-0 scale shuffle 广播已经独立 A/B，虽然正确，但稳定回退
+  9.74%～21.27%，因此不采用。ACoolFIsh 最新 vec4 映射与 subgroup shuffle
+  并不等价于该失败实验，需要在当前 Kernel 上做隔离 A/B 后才能吸收。
 - plain 非 gather 路径是连续访存，可评估独立 `T.copy` 快速路径；任何
   改动都需要重新执行正确性、Benchmark 和 mcProfiler A/B。
-- 固定 TileLang 基线采用上游动态 token 维度，并且只运行完整 128-token
-  block；当前 Plain 差距需要把“动态 token”和“完整块无边界分支”拆成两个
-  独立实验。
+- 必须保留正 `pos_to_token` 越界拒绝、负索引 padding 语义和 Kernel 尾块
+  guard；不能用 Op-side CUDA `F.pad` 或静默 OOB 处理换取不可归因的性能变化。
 - 首次检查新的 `pos_to_token` 会执行范围校验并同步 Host；当前用有限
-  cache 避免重复校验，生产模式可进一步评估可选校验策略。
+  cache 避免重复校验。缓存身份与 allocator 地址复用仍需单独审查，不能
+  假设相同地址永久代表相同 position 内容。
 - 小 workload 不适合 mcProfiler `--single-pass` Roofline，应该选择能
   充分覆盖设备的中等 workload。
+- 本项目不采用 ACoolFIsh 分支中的 `torch.compile`、custom-op、fake/meta
+  注册；公共执行边界保持 eager Python Op + TileLang JIT，不声明
+  `torch.compile` 支持。
 
 ## 12. 一键复核命令
 
 ```bash
 export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 
-python scripts/validate_manifest.py
-python scripts/validate_manifest.py \
-  --check-op QuantPerChannelCastFusedOp --strict
+./scripts/run_quant_per_channel_cast_fused.sh smoke
+./scripts/run_quant_per_channel_cast_fused.sh correctness
+./scripts/run_quant_per_channel_cast_fused.sh baselines
+./scripts/run_quant_per_channel_cast_fused.sh benchmark
+./scripts/run_quant_per_channel_cast_fused.sh gates
 
-python -m pytest -q tests/ops/test_per_channel_cast_fused.py
-python -m pytest -q tests/ops/test_per_channel_cast_fused_baselines.py
-python -m pytest -q benchmarks/tests
-python -m pytest -q tests/test_ops_manifest.py
-
-python -m pytest -q -s benchmarks/ops/bench_per_channel_cast_fused.py
-
-ruff check benchmarks/ops/bench_per_channel_cast_fused.py \
-  benchmarks/ops/per_channel_cast_fused_baselines.py \
-  tests/ops/test_per_channel_cast_fused.py \
-  tests/ops/test_per_channel_cast_fused_baselines.py \
-  tileops/kernels/quant/per_channel_cast_fused.py \
-  tileops/testing/per_channel_cast_fused.py
-git diff --check
+./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium production
+./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium shared
+./scripts/run_quant_per_channel_cast_fused.sh profile expand-medium production
+./scripts/run_quant_per_channel_cast_fused.sh profile expand-medium shared
+./scripts/run_quant_per_channel_cast_fused.sh profile rescale-control production
 ```
+
+`smoke` 适合快速检查；`correctness` 执行全部 33 项生产测试；`baselines`
+验证固定 provenance 常量和数值门禁；`benchmark` 运行四方 9-workload 报告；`gates`
+统一运行 diff、Manifest、Benchmark 基础测试、Ops Manifest 和 Ruff 检查。
+`profile` 由脚本调用 mcProfiler，并用稳定 driver 隔离目标 Kernel。
 
 ## 13. 完成状态
 
@@ -921,11 +859,14 @@ git diff --check
 | QuantTensor/FP8 输入 | 完成 |
 | plain/expand/rescale/rescale-expand | 完成 |
 | C500 全路径 `tile_k=64` | 完成；含 shared-memory 门禁 |
-| 正确性、边界、异常测试 | 29 项通过 |
+| 混合 thread-local/shared staging | 完成；Plain/Expand local，Rescale shared |
+| 正确性、边界、异常测试 | 33 项通过 |
 | 固定基线测试 | 7 项通过 |
 | eager PyTorch 基线 | 完成并固定上游 SHA |
 | 官方式 TileLang 基线 | 完成；`dev@0266ab7` + C500 `tile_k=64` |
-| Benchmark | 9 组三方 workload 实测完成 |
-| mcProfiler | Plain/Rescale 优化前后 4 份 A/B 报告完成 |
-| Roofline | 公式、切片折算、原配置与 tile64 实测效率完成 |
+| Benchmark | 9 组四方 workload、3 次完整独立报告实测完成 |
+| profile driver/runner | 完成；支持 production/shared 单变量采样 |
+| mcProfiler | Plain/Expand 同协议 A/B 与 Rescale 控制组共 5 份精确报告完成 |
+| Roofline | 9 组语义 Roofline、整卡保守参考与未校准 25% 线性参考完成 |
+| `torch.compile` 集成 | 按设计不采用；保持 eager Python Op + TileLang JIT |
 | MetaX C500 验证 | 完成 |
