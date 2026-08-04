@@ -57,6 +57,7 @@ def test_per_channel_cast_fused_c500_shared_memory_budget() -> None:
     assert _shared_memory_bytes(64, torch.float32) == 33_792
     assert _shared_memory_bytes(128, torch.float32) == 67_584
     assert _shared_memory_bytes(128, torch.bfloat16) == 34_816
+    assert _shared_memory_bytes(64, torch.float8_e4m3fn) == 9_216
     assert _shared_memory_bytes(256, torch.float8_e4m3fn) == 36_864
     assert _shared_memory_bytes(128, torch.float32) > _C500_SHARED_MEMORY_LIMIT_BYTES
     assert _shared_memory_bytes(64, torch.float32) <= _C500_SHARED_MEMORY_LIMIT_BYTES
