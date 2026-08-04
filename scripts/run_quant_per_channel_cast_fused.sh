@@ -63,13 +63,33 @@ case "${command_name}" in
             *) usage; exit 2 ;;
         esac
         profiler_bin=${MCPROFILER_BIN:-/opt/mcProfiler-ubuntu18.04/mcProfiler}
+        profile_metrics=(
+            "WORKGROUPS"
+            "WAVES"
+            "Average Wave life cycles"
+            "Global Read Instructions"
+            "Global Write Instructions"
+            "Private Read Instructions"
+            "Private Write Instructions"
+            "VL1 Hit Rate"
+            "L2C Hit Rate"
+            "Global Memory Read bytes"
+            "Global Memory Write bytes"
+            "RoofLine"
+            "load instructions"
+            "store instructions"
+            "shared memory access efficiency"
+        )
+        cd /tmp
         "${profiler_bin}" perf_exec \
             --cmdline "${repo_root}/scripts/run_quant_per_channel_cast_fused.sh profile-driver --case ${profile_case} --staging ${staging}" \
             --cwd "${repo_root}" \
             --kernelname main_kernel \
             --casename "quant_${profile_case//-/_}_${staging}" \
+            --metrics "${profile_metrics[@]}" \
+            --kernelnames main_kernel \
             --counts 1 \
-            --single-pass
+            --per-kernel
         ;;
     *)
         usage
