@@ -27,10 +27,25 @@ _EXPAND_OP = "QuantPerChannelCastFusedExpandOp"
 _RESCALE_OP = "QuantPerChannelCastFusedRescaleOp"
 _RESCALE_EXPAND_OP = "QuantPerChannelCastFusedRescaleExpandOp"
 
-_PLAIN_WORKLOADS = load_workloads(_PLAIN_OP)
-_EXPAND_WORKLOADS = load_workloads(_EXPAND_OP)
-_RESCALE_WORKLOADS = load_workloads(_RESCALE_OP)
-_RESCALE_EXPAND_WORKLOADS = load_workloads(_RESCALE_EXPAND_OP)
+
+def _is_stable_workload(workload: dict) -> bool:
+    return workload.get("__suite") != "augenstern-performance"
+
+
+_PLAIN_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_PLAIN_OP)))
+_EXPAND_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_EXPAND_OP)))
+_RESCALE_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_RESCALE_OP)))
+_RESCALE_EXPAND_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_RESCALE_EXPAND_OP)))
+
+assert tuple(
+    len(workloads)
+    for workloads in (
+        _PLAIN_WORKLOADS,
+        _EXPAND_WORKLOADS,
+        _RESCALE_WORKLOADS,
+        _RESCALE_EXPAND_WORKLOADS,
+    )
+) == (3, 2, 2, 2)
 
 _OP_CLASSES = {
     _PLAIN_OP: QuantPerChannelCastFusedOp,

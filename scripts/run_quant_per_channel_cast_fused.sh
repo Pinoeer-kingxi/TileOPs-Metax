@@ -6,7 +6,7 @@ tilelang_root=${TILELANG_ROOT:-/opt/tilelang-metax-v0.1.10}
 export PYTHONPATH="${tilelang_root}:${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
 usage() {
-    echo "usage: $0 {smoke|matrix|correctness|baselines|benchmark|gates|profile|profile-driver} [args...]" >&2
+    echo "usage: $0 {smoke|matrix|correctness|baselines|benchmark|benchmark-matrix|gates|profile|profile-driver} [args...]" >&2
 }
 
 command_name=${1:-}
@@ -39,6 +39,9 @@ case "${command_name}" in
     benchmark)
         python -m pytest -vvs benchmarks/ops/bench_per_channel_cast_fused.py "$@"
         ;;
+    benchmark-matrix)
+        python -m pytest -vvs benchmarks/ops/bench_per_channel_cast_fused_augenstern.py "$@"
+        ;;
     gates)
         git diff --check
         python scripts/validate_manifest.py
@@ -55,6 +58,7 @@ case "${command_name}" in
             tests/ops/test_per_channel_cast_fused_augenstern.py \
             tests/ops/test_per_channel_cast_fused_baselines.py \
             benchmarks/ops/bench_per_channel_cast_fused.py \
+            benchmarks/ops/bench_per_channel_cast_fused_augenstern.py \
             benchmarks/ops/per_channel_cast_fused_baselines.py \
             benchmarks/ops/profile_per_channel_cast_fused.py
         ;;
