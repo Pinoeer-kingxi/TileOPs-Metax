@@ -8,7 +8,7 @@
 ### 提交前自查
 
 - 小组编号：待小组填写
-- 课题名称：待小组确认
+- 课题名称：面向 MetaX C500 的按通道分块量化算子性能分析与优化
 - 主算子名称：`quant_per_channel_cast_fused`
 - 追加算子名称：无；Plain、Expand、Rescale、RescaleExpand 是主算子的四个变体
 - 各算子认领 Issue：待填写本组 GitLink 算子认领 Issue
@@ -26,7 +26,7 @@
 - [ ] 已完成答辩演练并确认时间安排
 - [x] 未提交敏感信息，不存在抄袭或虚假数据
 
-- 当前未完成项：补充小组、课题和认领 Issue；创建正式 GitLink PR B 并填写
+- 当前未完成项：补充小组和认领 Issue；创建正式 GitLink PR B 并填写
   官方模板；在最终 GitLink 提交 SHA 上复跑20项四方 Benchmark；确认 Manifest
   workload 从 PR A 9项演进为当前20项的提交方式；处理或确认全仓 pre-commit
   历史格式问题；完成答辩 PPT 和演练。
