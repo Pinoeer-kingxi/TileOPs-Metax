@@ -1,108 +1,97 @@
 # quant_per_channel_cast_fused：GitLink PR B 提交前自查
 
-> 对照官方 `summer-camp-2026` 指南和算子迁移 PR 模板整理。本文用于最终
-> GitLink PR B，不代表当前 GitHub 过程管理 PR 已提交到官方仓库。勾选项均有
-> 当前仓库或同级结果目录中的证据；未完成项保持未勾选。
+> 以下“自查留言”严格保持 GitLink Issue #4 的栏目、顺序和勾选项，可在补齐
+> 人工信息后直接复制到该 Issue。未实际完成的项目不提前勾选。
 
-## 1. 待人工补充的课题信息
+## 自查留言
 
-- [ ] 课题名称：待小组确认。
-- [ ] 课题完整简介：待小组确认最终课题范围后填写。
-- [ ] 算子认领 Issue：待填写本组 GitLink Issue 链接。
-- [ ] 小组编号与成员：待填写。
-- [x] GitLink PR A `#29` 已合入 `summer-camp-2026`。PR head 与最终 Manifest
-  提交均为 `81a39fda24291a2c42b0e6b5c64453bb4b78774f`；已验证该提交是
+### 提交前自查
+
+- 小组编号：待小组填写
+- 课题名称：待小组确认
+- 主算子名称：`quant_per_channel_cast_fused`
+- 追加算子名称：无；Plain、Expand、Rescale、RescaleExpand 是主算子的四个变体
+- 各算子认领 Issue：待填写本组 GitLink 算子认领 Issue
+- 各算子实现 PR：待创建正式 GitLink PR B；GitHub PR #5 仅用于组内过程管理
+
+- [ ] 算子认领及来源信息完整
+- [ ] 已提交 PR，并完整填写统一 PR 模板
+- [x] Manifest、算子实现、测试和 Benchmark 已完成
+- [x] 正确性、边界及异常测试通过
+- [ ] 已在真实 MetaX C500 上完成最终验证
+- [ ] 性能数据、mcProfiler 和 Roofline 证据完整
+- [ ] Review 阻塞问题已经处理
+- [ ] 答辩 PPT 已完成
+- [ ] PPT 包含任务介绍、实现方案、正确性、性能优化及开源价值
+- [ ] 已完成答辩演练并确认时间安排
+- [x] 未提交敏感信息，不存在抄袭或虚假数据
+
+- 当前未完成项：补充小组、课题和认领 Issue；创建正式 GitLink PR B 并填写
+  官方模板；在最终 GitLink 提交 SHA 上复跑20项四方 Benchmark；确认 Manifest
+  workload 从 PR A 9项演进为当前20项的提交方式；处理或确认全仓 pre-commit
+  历史格式问题；完成答辩 PPT 和演练。
+- 需要助教协助的事项：确认当前20项 Manifest workload 能否随 PR B 提交，
+  还是需要先提交 Manifest 补充 PR；确认本算子范围外的历史文档格式问题是否
+  阻塞单算子 PR 的 `pre-commit run --all-files` 门禁。
+- 当前结论：尚需补充
+- 小组负责人：待小组填写
+- 小组成员：待小组填写
+
+## 技术证据附录
+
+该附录用于支撑上述勾选状态，不属于 Issue #4 官方模板正文。
+
+### Manifest 与来源
+
+- GitLink PR A：`#29`。
+- PR A head/Manifest提交：
+  `81a39fda24291a2c42b0e6b5c64453bb4b78774f`。
+- 已验证该提交是官方
   `summer-camp-2026@df672b398134cbffd73e83fb816c36602fc3f3cf` 的祖先。
-
-算子名称为 `quant_per_channel_cast_fused`，改动类型为 `optimize`。最终 PR 标题
-应采用：
-
-```text
-[quant_per_channel_cast_fused] optimize: 优化 C500 分块、staging 与向量化访存
-```
-
-## 2. 来源、范围与实现
-
-- [x] 上游仓库：`https://github.com/MetaX-MACA/TileKernels-Metax`。
-- [x] 上游提交：`0266ab740980de7dc03a828b8259cd73d100c2eb`。
-- [x] 上游源码：`tile_kernels/quant/per_channel_cast_fused_kernel.py`。
-- [x] 上游 Kernel SHA256：
+- 上游仓库：`https://github.com/MetaX-MACA/TileKernels-Metax`。
+- 上游提交：`0266ab740980de7dc03a828b8259cd73d100c2eb`。
+- 上游源码：`tile_kernels/quant/per_channel_cast_fused_kernel.py`。
+- 上游 Kernel SHA256：
   `64e7ad56bd8ea125c561b1726a1cdf13ce78bf722cb9bef520452026157edafc`。
-- [x] 四个变体均实现：Plain、Expand、Rescale、RescaleExpand。
-- [x] Op、Kernel、workload、Manifest、功能测试与 Benchmark 分层完整。
-- [x] Manifest 为 `implemented`，四变体各有 `vars/flops/bytes` 和5个正式
-  workload，共20项。
-- [x] 当前 production 固定 `tile_k=64`；Plain/Expand 使用 thread-local
-  staging 和 vec4；Rescale 两路使用 shared staging 和动态 vec8/vec4/vec2。
-- [x] 未把 PyTorch reference 放进 production 执行路径。
+- 当前 Manifest 为 `implemented`，包含四个变体和20项正式 workload；另已
+  完整复测 PR A 原始9项兼容 workload。
 
-## 3. 正确性证据
+### 正确性
 
-- [x] 独立 PyTorch eager oracle 与 production 的 FP8 输出逐元素一致；scale
-  使用 `atol=1e-7, rtol=1e-6`。
-- [x] 覆盖 BF16、FP32、FP8、round、128-token 边界、hidden 边界、Expand
-  gather/padding/repeated/reverse、尾块、空输入、极值和异常参数。
-- [x] C500 完整功能回归：`45 passed in 26.63s`（2026-08-05）。
-- [x] Benchmark 基线与基础设施测试：`24 passed in 27.31s`（2026-08-05）。
-
-复现命令：
+- 独立 PyTorch eager oracle 与 production FP8 输出逐元素一致。
+- Scale 容差：`atol=1e-7, rtol=1e-6`。
+- 覆盖 BF16、FP32、FP8、round、tile/hidden边界、Expand索引与padding、
+  尾块、空输入、极值和异常参数。
+- 当前完整功能回归：`45 passed in 26.63s`。
+- Benchmark 基线与基础设施：`24 passed in 27.31s`。
 
 ```bash
-export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/gxy/TileOPs-Metax-team:$PYTHONPATH
+export PYTHONPATH=/opt/tilelang-metax-v0.1.10:$PWD:$PYTHONPATH
 python -m pytest -q tests/ops/test_per_channel_cast_fused.py
 python -m pytest -q benchmarks/tests
 ```
 
-## 4. 性能与分析证据
+### 性能与分析
 
-- [x] 正式性能矩阵共20项，四个变体各5项；每项在计时前先做严格数值门禁。
-- [x] 比较 production、PyTorch eager、`torch.compile(fullgraph=True)` 和固定
-  上游 TileKernels TileLang 三个外部基线。
-- [x] 标准协议为10次 warmup、50次 repeat、3次 trial。
-- [x] 完整C500上的上一阶段20项四方基线已归档；production相对 eager
-  `3.3876x`、相对上游 TileKernels `2.2433x`，两者均20/20胜出。
-- [x] Rescale动态向量化单变量A/B：10/10胜出，几何平均`1.2169x`。
-- [x] Plain/Expand vec4单变量A/B：10/10胜出，几何平均`1.2555x`，单项
-  `1.1253x–1.3922x`。
-- [x] `tile_k=128`失败消融如实记录：0/10胜出，平均增加57.62%延迟，已回退。
-- [x] PR A #29原始9项兼容集已额外复测，不改变当前20项Manifest。9项均通过
-  严格正确性门禁；production相对eager几何平均`5.2789x`、相对固定上游
-  TileKernels几何平均`3.2286x`，均为9/9胜出。本轮按约定未运行torch.compile。
-- [x] mcProfiler已覆盖Plain/Expand staging前后和Rescale vec8/vec4/vec2；未
-  观察到Private Read/Write spill，并保留shared、wave和访存计数。
-- [ ] 在最终GitLink PR B代码提交上重新执行20项四方Benchmark并归档报告。
-  三个外部基线实现未变化，当前优化的production-only A/B已完成；该项是最终
-  提交SHA的一致性复核，不能用旧提交报告冒充。
+- 正式20项：四个变体各5项，10次warmup、50次repeat、3次trial。
+- 上一阶段完整C500四方结果：production相对eager `3.3876x`、相对上游
+  TileKernels `2.2433x`，两者均20/20胜出。
+- Rescale动态向量化A/B：10/10胜出，几何平均`1.2169x`。
+- Plain/Expand vec4 A/B：10/10胜出，几何平均`1.2555x`。
+- PR A原始9项兼容集：全部通过正确性；production相对eager几何平均
+  `5.2789x`、相对上游TileKernels `3.2286x`，均9/9胜出；未运行
+  `torch.compile`。
+- `tile_k=128`失败消融：0/10胜出，平均增加57.62%延迟，已回退。
+- mcProfiler覆盖Plain/Expand staging前后及Rescale vec8/vec4/vec2；未观察到
+  Private Read/Write spill，并保留shared、wave和访存计数。
 
-性能结果目录（不提交进源码仓库）：
+### 门禁状态
 
-```text
-/data/gxy/TileOPs-Metax-team-results/full-c500-2026-08-05/
-/data/gxy/TileOPs-Metax-team-results/txy-vectorized-ab-2026-08-05/
-/data/gxy/TileOPs-Metax-team-results/dynamic-tilek-2026-08-05/
-/data/gxy/TileOPs-Metax-team-results/pr-a9-compat-2026-08-05/
-```
-
-## 5. 官方提交门禁
-
-- [x] `git diff --check`：通过。
-- [x] `python scripts/validate_manifest.py`：通过。全仓449条为advisory warning；
-  本算子10条均为synthetic mock不满足输入前置条件，未出现blocking error。
-- [x] 本算子功能测试：45项通过。
-- [x] `python -m pytest -q benchmarks/tests`：24项通过。
-- [x] `pre-commit`中的private-key、gitleaks、YAML、TOML、Python AST、merge
-  conflict和codespell检查通过。
-- [ ] `pre-commit run --all-files`整体通过。当前首轮会格式化本PR范围外的历史
-  文档及5份必须保持原样的mcProfiler证据，并修复3个既有Python lint问题；
-  为避免把无关机械改动混入单算子PR，自动修改已恢复。最终提交前需与维护者
-  确认是基于最新官方目标分支重放，还是单独处理仓库级格式债务。
-
-## 6. PR 模板与流程
-
-- [x] 优化方案、正确性、性能、加速比、失败消融、mcProfiler瓶颈和复现命令
-  已写入算子README与开发记录。
-- [x] 临时性能日志和Profiler数据库位于仓库同级结果目录，没有进入Git索引。
-- [x] 当前提交不包含密码、Token、私钥、容器地址或完整环境变量。
-- [ ] 使用官方 `operator-migration.zh-CN.md` 模板创建GitLink PR B，并完整填写
-  第1节中的小组信息及最终测试提交SHA。
-- [ ] 在GitLink Issue #4按官方模板完成提交前检查；未完成项不得提前勾选。
+- `git diff --check`：通过。
+- `python scripts/validate_manifest.py`：通过；全仓449条均为advisory warning，
+  没有blocking error。
+- private-key、gitleaks、YAML、TOML、Python AST、merge conflict和codespell：
+  通过。
+- `pre-commit run --all-files`：尚未整体通过。它会格式化本算子PR范围外的历史
+  文档和5份需保持原样的mcProfiler报告，并修复3个既有Python lint问题；自动
+  修改已恢复，等待维护者确认仓库级格式债务的处理方式。
