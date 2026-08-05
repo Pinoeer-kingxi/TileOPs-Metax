@@ -20,6 +20,7 @@ Rescale-Expand 继续使用 shared staging。公开 Op 接口和计算语义没�
 | `tile_k=64`/固定基线提交 | `253fe14e7c33e5c9851e6120d46caf78cbe3d13b` |
 | register staging 提交 | `6ec6bde` |
 | 测试与精确 A/B 入口提交 | `3a0f2c0` |
+| augenstern 70 项矩阵提交 | `266fabb` |
 | 当前实测提交 | `ec3f87d6b357f9d97ab80cc49ee783ed4b4db742` |
 | Rescale shared 预算门禁提交 | `c9655a2` |
 | 生产 Kernel SHA256 | `3b7df342a2dba2db0988210dc5aa608793cc708cc08bb35e748a1010e854d30c` |
@@ -33,6 +34,7 @@ Rescale-Expand 继续使用 shared staging。公开 Op 接口和计算语义没�
 | ACoolFIsh 审查版本 | `497e7237546c5df4ec8056b0e423151bffbfad0c` |
 | augenstern 审查分支 | `exp/quant-per-channel-register-resident` |
 | augenstern 审查版本 | `387119e154c6cfa4d09b25823635814380af91f9` |
+| augenstern 测试最后提交 / blob | `c77cc75caa4b8a281a814b66b06102564ef33a01` / `11238539f3f64e2b5585a7a906067eab9d7e1e7c` |
 | 实测设备 | MetaX C500，25% sGPU，16000 MiB Vram Quota |
 | 实测日期 | 2026-08-04 |
 
@@ -63,7 +65,8 @@ Kernel 的编译期 `register_staging=True/False` 做对照，避免把动态 sh
 2. Op、Kernel、reference、测试和 Benchmark 分层清楚。
 3. 契约覆盖正数越界索引、负数 padding、空输入和非整块尾部；Op 有直接校验，
    但第 12 节记录的 position-cache identity 风险仍需独立修复。
-4. 33 项正确性、边界和异常测试覆盖两个外部分支缺失的失败语义。
+4. 本地 33 项正确性/契约测试与 augenstern 完整 70 项兼容矩阵互补；
+   前者覆盖外部分支缺失的失败语义，后者提供完整 shape 广度。
 5. FP8 输出使用逐元素完全一致的正确性门禁。
 6. 另有 7 项固定基线测试，以及完整 Benchmark、mcProfiler 和 Roofline
    证据。
@@ -104,6 +107,24 @@ Rescale/Rescale-Expand shared staging
 - `torch.compile`/custom-op/fake/meta 调用边界超出本次算子迁移范围，明确不采用。
 - 最终方案：保持当前工程基础，只吸收有独立 C500 实测证据的优化。
 
+### 2.4 从原始迁移到当前代码
+
+对 `967b65b..HEAD` 的生产 Op/Kernel diff 进行审计后，只有两项真正
+改变设备执行的 Kernel 优化。`tileops/ops/quant/per_channel_cast_fused.py`
+在这个区间没有 diff，四个公开 Op、静态 Kernel cache、shape/dtype
+校验、空输入和正 OOB 失败语义均是原始迁移已有能力，不是后续
+性能优化。
+
+| 项目 | 原始迁移 `967b65b` | 当前代码 | 影响 |
+|---|---|---|---|
+| `tile_k` | Rescale=256，BF16 Plain/Expand=128，FP32=64 | 四路径固定 64 | BF16 隔离 A/B 增加约 2 倍 hidden workgroup，Rescale 增加约 4 倍；22 组中 21 组延迟降低 19.64%～72.94%，原来已是 tile64 的 FP32 用例持平 |
+| input staging | 四路径均使用 shared tile | Plain/Expand thread-local；Rescale 两路 shared | 吸收 augenstern `fa6bafe` 消融和 `87b083c` 变体选择；五组延迟降低 3.38%～76.78% |
+| shared/CTA | BF16 tile128 34,816 B；FP32 tile64 33,792 B；FP8 tile256 36,864 B | Plain/Expand 1,024 B；Rescale 9,216 B | Plain/Expand 删除一次 shared store/load 往返；增加 C500 64 KiB 预算门禁 |
+| 语义 HBM 与 FLOPs | 两遍 amax/量化 | 不变 | 优化改变片上资源和并行度，不改变 Roofline 字节数与计算量 |
+
+这两阶段的 A/B workload 矩阵不同，不能将百分比相乘成一个没有
+直接实测的“最终总加速”。
+
 ## 3. 当前语义和代码边界
 
 相关代码：
@@ -112,6 +133,7 @@ Rescale/Rescale-Expand shared staging
 - Op：[`tileops/ops/quant/per_channel_cast_fused.py`](../../../tileops/ops/quant/per_channel_cast_fused.py)
 - 独立 reference：[`tileops/testing/per_channel_cast_fused.py`](../../../tileops/testing/per_channel_cast_fused.py)
 - 测试：[`tests/ops/test_per_channel_cast_fused.py`](../../../tests/ops/test_per_channel_cast_fused.py)
+- augenstern 70 项兼容矩阵：[`tests/ops/test_per_channel_cast_fused_augenstern.py`](../../../tests/ops/test_per_channel_cast_fused_augenstern.py)
 - 固定基线测试：[`tests/ops/test_per_channel_cast_fused_baselines.py`](../../../tests/ops/test_per_channel_cast_fused_baselines.py)
 - 固定 TileLang 基线：[`benchmarks/ops/per_channel_cast_fused_baselines.py`](../../../benchmarks/ops/per_channel_cast_fused_baselines.py)
 - Benchmark：[`benchmarks/ops/bench_per_channel_cast_fused.py`](../../../benchmarks/ops/bench_per_channel_cast_fused.py)
@@ -324,11 +346,27 @@ Kernel 更快。除最小 Plain 和两组 Rescale 外，生产 Kernel 已经达�
 
 ### 8.1 完整测试套件
 
-当前生产测试结果为：
+本地契约测试结果为：
 
 ```text
 33 passed
 ```
+
+augenstern `exp/quant-per-channel-register-resident@387119e` 的完整兼容
+矩阵结果为：
+
+```text
+70 passed in 183.35s
+```
+
+同一进程的统一 `correctness` 入口合并执行两个套件，结果为：
+
+```text
+103 passed in 32.08s
+```
+
+该统一运行复用了前一次矩阵运行生成的 TileLang 编译缓存，因此耗时
+只用于复现当时环境，不与冷缓存的 183.35 秒直接比较。
 
 固定 TileLang/PyTorch 基线自身的 5 种计算路径和 2 项契约测试结果：
 
@@ -354,26 +392,33 @@ Kernel 更快。除最小 Plain 和两组 Rescale 外，生产 Kernel 已经达�
 - 输出 shape、dtype 和 contiguous。
 - FP8 逐元素完全一致。
 
-### 8.2 新增的大 shape 与尾块门禁
+### 8.2 augenstern 70 项兼容矩阵
 
-从 augenstern 的扩展矩阵中选择了对当前实现有辨识力、同时不重复堆叠的用例：
+远端测试最后三个功能提交为 `ff86cdf`、`ea5d33e` 和
+`c77cc75`。当前分支已将其完整迁移为独立测试文件：
 
-```text
-plain 1024×7168 BF16 rounded:
-  FP8 输出逐元素完全一致
-  scale: atol=1e-7, rtol=1e-6
+| 分组 | 数量 |
+|---|---:|
+| 基础四变体 | 17 |
+| 固定 `hidden=512` token sweep | 20 |
+| Plain token × hidden | 8 |
+| Expand token × hidden | 8 |
+| Rescale token × hidden | 5 |
+| Rescale-Expand token × hidden | 5 |
+| Gather pattern | 3 |
+| 数值边界 | 3 |
+| 构造参数校验 | 1 |
+| **合计** | **70** |
 
-expand 153×128 FP32 → 160 rounded:
-  覆盖 source 非整块、输出尾块和 FP32 local staging
+所有 shape、dtype、`round_sf`、测试 ID 和 smoke/full 层级与远端一一
+对应；源码内用分组计数与总数断言防止后续静默丢失用例。本地
+保留 `torch.manual_seed(0)` 与 Rescale 的耦合输入生成，但使用仓内
+独立 eager PyTorch reference、FP8 逐元素精确比较和 scale 严格容差。
+远端的 reference OOM 静默返回和非 MACA 宽松相似度路径没有吸收。
 
-rescale-expand 513×7168 → 1024 FP8:
-  FP8 输出逐元素完全一致
-  scale: atol=1e-7, rtol=1e-6
-```
-
-远端 70 项测试以 shape 矩阵为主；当前 33 项数量更少，但同时保留正 OOB
-失败、空输入、空 source、非连续输入、非法 dtype/shape 和精确输出门禁，不能
-只按测试数量判断覆盖质量。
+本地 33 项套件继续保留正 OOB 失败、空输入、空 source、非连续
+输入、非法 dtype/shape、输出 contiguous、shared-memory 预算和 staging
+策略门禁。两个套件合计 103 个 pytest 节点，职责互补。
 
 ## 9. mcProfiler 分析
 
@@ -643,7 +688,8 @@ ACoolFIsh 最新 Kernel 会把超界正索引当成 padding 零值，Op 不主�
 这是有技术依据的候选，但不直接合入：其分支同时使用动态 token、按规模切换
 tile64/tile256、scale shuffle 和不同 Op 尾块策略，提交百分比不能归因到 vec4
 单点。后续应在当前静态 shape、安全边界和 tile64 shared Rescale 上只切换
-`threads_per_token=64→16`，通过当前 33 项测试并做完整 Rescale A/B 后决定。
+`threads_per_token=64→16`，通过当前 103 项正确性测试并做完整
+Rescale A/B 后决定。
 
 ### 11.6 `torch.compile` 与整体接口替换
 
@@ -715,14 +761,15 @@ ACoolFIsh 分支还包含 custom-op/fake/meta 等 `torch.compile` 调用边界�
 
 已完成：
 
-1. 主算子 33 项测试通过。
-2. 固定基线 7 项测试通过。
-3. BF16、FP32、FP8 和四个变体全部覆盖。
-4. 16/144/160 token 尾块只由安全的 TileOps Kernel 验证；固定官方式性能基线
+1. 本地契约 33 项测试通过。
+2. augenstern 完整 70 项兼容矩阵通过。
+3. 固定基线 7 项测试通过。
+4. BF16、FP32、FP8 和四个变体全部覆盖。
+5. 16/144/160 token 尾块只由安全的 TileOps Kernel 验证；固定官方式性能基线
    只允许完整 128-token block，避免掩盖其适用边界。
-5. FP8 输出逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
-6. benchmark 增加同 Kernel shared-staging 对照，计时前与独立 reference 比较。
-7. 三次完整运行证明 Plain/Expand 五组无回退，收益 3.38%～76.78%。
+6. FP8 输出逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
+7. benchmark 增加同 Kernel shared-staging 对照，计时前与独立 reference 比较。
+8. 三次完整运行证明 Plain/Expand 五组无回退，收益 3.38%～76.78%。
 
 ### 13.4 mcProfiler 与 Roofline 验收（已完成）
 
@@ -749,7 +796,8 @@ ACoolFIsh 分支还包含 custom-op/fake/meta 等 `torch.compile` 调用边界�
 1. 保持当前 Op、静态 shape、tile64、shared staging 和正 OOB 语义。
 2. 只把 Rescale 的 `threads_per_token` 从 64 改为 16，使 `vec_k=4`。
 3. 同时正确处理 64-lane wave 内四个 16-lane subgroup 的 position/scale shuffle。
-4. 运行 33+7 测试和全部 Rescale/Rescale-Expand workload。
+4. 运行 103 项正确性测试、7 项基线测试和全部
+   Rescale/Rescale-Expand workload。
 5. 对 private spill、shared conflict、wave cycles 和 occupancy 做 profiler A/B。
 6. 中大型 workload 回退超过 3%，或任一路径出现 private spill，即拒绝。
 
@@ -776,9 +824,11 @@ specialization，完整块快速路径仍可能改善最小 workload，但两者
 4. `test(quant): fix staging validation and profiler entrypoints`（已完成，`3a0f2c0`）
 5. `perf(quant): isolate exact profiler metrics`（已完成，`ec3f87d`）
 6. `test(quant): pin rescale shared memory budget`（已完成，`c9655a2`）
-7. `docs(quant): record register-staging evidence`（本次文档）
-8. `fix(quant): make position validation cache identity-safe`（后续独立提交）
-9. `optimize(quant): vectorize small rescale staging`（仅在独立 A/B 通过后）
+7. `docs(quant): record register-staging evidence`（已完成，`dbf08f7`）
+8. `test(quant): port augenstern correctness matrix`（本次，包含 70 项矩阵与统一脚本入口）
+9. `docs(quant): record full correctness matrix and optimization delta`（本次）
+10. `fix(quant): make position validation cache identity-safe`（后续独立提交）
+11. `optimize(quant): vectorize small rescale staging`（仅在独立 A/B 通过后）
 
 不要把 vec4、动态 shape、完整块快速路径、validation cache 或
 `torch.compile` 调用边界放入同一个提交。
@@ -814,6 +864,6 @@ specialization，完整块快速路径仍可能改善最小 workload，但两者
 3. 只有在有明确冷启动或 cache 需求时，再评估动态 token Kernel。
 4. 不开展 `torch.compile` 集成，也不重新引入已经回退的独立 scale shuffle。
 
-每个后续点都必须保持 33 项生产测试、7 项固定基线测试，以及 production、
+每个后续点都必须保持 103 项正确性测试、7 项固定基线测试，以及 production、
 同 Kernel shared 对照、固定 TileLang、eager PyTorch 的 Benchmark 可复现，
 并使用独立提交保证性能归因。
