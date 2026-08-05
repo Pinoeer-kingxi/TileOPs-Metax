@@ -70,6 +70,8 @@ def _per_channel_cast_fused_kernel(
     tile_k = _TILE_K
     vec_k = tile_k // _NUM_THREADS_PER_TOKEN
     vec_m = tile_m * _NUM_THREADS_PER_TOKEN // _NUM_THREADS
+    token_groups = _NUM_THREADS // _NUM_THREADS_PER_TOKEN
+    k_groups_per_wave = _NUM_THREADS_PER_TOKEN // token_groups
     sf_cols = hidden // _NUM_PER_CHANNELS if with_rescale else 1
     pos_size = num_tokens_out if with_expand else 1
 
@@ -107,27 +109,26 @@ def _per_channel_cast_fused_kernel(
             pos_to_token_local = T.alloc_local((vec_m,), T.int32)
             sf_invs_local = T.alloc_local((vec_m,), T.float32)
             amax_local = T.alloc_local((vec_k,), T.float32)
-            amax_shared = T.alloc_shared((vec_k, _NUM_THREADS), T.float32)
             in_local = T.alloc_local((vec_k,), in_dtype)
             out_local = T.alloc_local((vec_k,), T.float8_e4m3fn)
 
             tid = T.get_thread_binding(0)
-            m_id = tid // _NUM_THREADS_PER_TOKEN
-            k_id = tid % _NUM_THREADS_PER_TOKEN
+            lane_id = tid % _NUM_THREADS_PER_TOKEN
+            wave_id = tid // _NUM_THREADS_PER_TOKEN
+            m_id = lane_id % token_groups
+            k_id = wave_id * k_groups_per_wave + lane_id // token_groups
             m_offset = pid_token * tile_m + m_id * vec_m
             k_offset = pid_hidden * tile_k + k_id * vec_k
             source_token = T.alloc_var(T.int32)
             logical_value = T.alloc_var(T.float32)
 
             if with_expand:
-                tmp = T.alloc_var(T.int32)
-                tmp = -1
-                if k_id < vec_m:
-                    pos_idx = m_offset + k_id
-                    if pos_idx < num_tokens_out:
-                        tmp = pos_to_token[pos_idx]
                 for i in T.serial(vec_m):
-                    pos_to_token_local[i] = T.shfl_sync(tmp, i)
+                    pos_idx = m_offset + i
+                    if pos_idx < num_tokens_out:
+                        pos_to_token_local[i] = pos_to_token[pos_idx]
+                    else:
+                        pos_to_token_local[i] = -1
 
             if with_rescale:
                 for i in T.serial(vec_m):
@@ -168,27 +169,16 @@ def _per_channel_cast_fused_kernel(
                         else:
                             x_shared[m_id * vec_m + i, k_id * vec_k + j] = 0.0
 
-            for i in T.unroll(vec_k):
-                amax_shared[i, tid] = amax_local[i]
-
             sf = T.alloc_var(T.float32)
             sf_inv = T.alloc_var(T.float32)
-            sf = 0.0
-            sf_inv = 0.0
-            col_id = tid % _NUM_THREADS_PER_TOKEN * vec_k + tid // _NUM_THREADS_PER_TOKEN
-            if tid < tile_k:
-                for i in T.serial(
-                    col_id // vec_k,
-                    _NUM_THREADS,
-                    _NUM_THREADS_PER_TOKEN,
-                ):
-                    sf = T.max(sf, amax_shared[col_id % vec_k, i])
+            for i in T.unroll(vec_k):
+                sf = amax_local[i]
+                sf = T.max(sf, T.shfl_xor(sf, 1, width=token_groups))
+                sf = T.max(sf, T.shfl_xor(sf, 2, width=token_groups))
                 sf, sf_inv = _scale_and_inverse(sf)
-                out_sf[pid_token, pid_hidden * tile_k + col_id] = sf
-                amax_shared[0, tid] = sf_inv
-
-            for i in T.serial(vec_k):
-                amax_local[i] = amax_shared[0, k_id + i * _NUM_THREADS_PER_TOKEN]
+                if m_id == 0:
+                    out_sf[pid_token, k_offset + i] = sf
+                amax_local[i] = sf_inv
 
             for i in T.serial(vec_m):
                 out_token = m_offset + i
