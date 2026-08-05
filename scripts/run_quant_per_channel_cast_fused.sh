@@ -56,7 +56,7 @@ case "${command_name}" in
         profile_case=${1:-}
         staging=${2:-production}
         case "${profile_case}" in
-            plain-medium|expand-medium|rescale-control) ;;
+            plain-medium|expand-medium|rescale-small|rescale-control|rescale-large) ;;
             *) usage; exit 2 ;;
         esac
         case "${staging}" in
@@ -81,7 +81,9 @@ case "${command_name}" in
             "store instructions"
             "shared memory access efficiency"
         )
-        cd /tmp
+        profiler_workdir=${MCPROFILER_WORKDIR:-/tmp}
+        mkdir -p "${profiler_workdir}"
+        cd "${profiler_workdir}"
         "${profiler_bin}" perf_exec \
             --cmdline "${repo_root}/scripts/run_quant_per_channel_cast_fused.sh profile-driver --case ${profile_case} --staging ${staging}" \
             --cwd "${repo_root}" \

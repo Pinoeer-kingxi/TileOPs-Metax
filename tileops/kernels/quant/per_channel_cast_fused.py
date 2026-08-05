@@ -22,6 +22,7 @@ _NUM_PER_TOKENS = 128
 _NUM_PER_CHANNELS = 128
 _NUM_THREADS = 256
 _NUM_THREADS_PER_TOKEN = 64
+_PLAIN_THREADS_PER_TOKEN = 16
 _SMALL_RESCALE_THREADS_PER_TOKEN = 8
 _DEFAULT_RESCALE_THREADS_PER_TOKEN = 16
 _LARGE_RESCALE_THREADS_PER_TOKEN = 32
@@ -74,13 +75,9 @@ def _per_channel_cast_fused_kernel(
     with_expand: bool,
     round_sf: bool,
     register_staging: bool,
+    threads_per_token: int,
 ):
     tile_m = _NUM_PER_TOKENS
-    threads_per_token = _NUM_THREADS_PER_TOKEN
-    if with_rescale:
-        # Rescale consumes FP8 input. Fewer lanes per token turn the existing
-        # vectorized loops into real vec8/vec4/vec2 global/shared accesses.
-        threads_per_token = _rescale_threads_per_token(num_tokens_out, with_expand)
     # Keep the hidden tile at one C500 wave. In particular, a 128x128 FP32
     # staging tile plus reduction scratch needs about 66 KiB of shared memory,
     # exceeding the C500's 64 KiB limit. A fixed tile of 64 is safe for every
@@ -257,12 +254,13 @@ class PerChannelCastFusedKernel(Kernel):
         self.round_sf = round_sf
         self.device = device
         self.tile_k = _TILE_K
-        self.threads_per_token = (
-            _rescale_threads_per_token(num_tokens_out, with_expand)
-            if with_rescale
-            else _NUM_THREADS_PER_TOKEN
-        )
         self.init_config(config, tune)
+        self.threads_per_token = self.config["threads_per_token"]
+        if self.threads_per_token not in (8, 16, 32, 64):
+            raise ValueError(
+                "threads_per_token must be one of 8, 16, 32, 64, got "
+                f"{self.threads_per_token}"
+            )
         self.register_staging = self.config["register_staging"]
         self.shared_memory_bytes = _shared_memory_bytes(
             self.tile_k,
@@ -285,6 +283,7 @@ class PerChannelCastFusedKernel(Kernel):
             with_expand,
             round_sf,
             self.register_staging,
+            self.threads_per_token,
         )
         self._dummy_sf = None
         self._dummy_pos = None
@@ -296,10 +295,19 @@ class PerChannelCastFusedKernel(Kernel):
     @property
     def default_config(self) -> dict:
         # Input values remain live across the column reduction. Keeping them
-        # thread-local removes one shared-memory write/read round trip for the
-        # plain paths. Rescale retains shared staging because its FP32 input
+        # Thread-local staging removes one shared-memory write/read round trip
+        # for the plain paths. Four adjacent hidden values per thread provide
+        # real vec4 accesses; a 10-shape C500 ablation beat vec1 and vec2 in
+        # every case. Rescale retains shared staging because its FP32 input
         # scales are live at the same time and increase register pressure.
-        return {"register_staging": not self.with_rescale}
+        return {
+            "register_staging": not self.with_rescale,
+            "threads_per_token": (
+                _rescale_threads_per_token(self.num_tokens_out, self.with_expand)
+                if self.with_rescale
+                else _PLAIN_THREADS_PER_TOKEN
+            ),
+        }
 
     def forward(
         self,

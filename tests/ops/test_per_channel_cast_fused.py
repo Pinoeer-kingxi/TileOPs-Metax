@@ -168,6 +168,7 @@ def test_per_channel_cast_fused_plain(
     op = QuantPerChannelCastFusedOp(round_sf=round_sf)
     _assert_quant_equal(op(x), per_channel_cast_fused_reference(x, round_sf=round_sf))
     assert op.kernel.tile_k == 64
+    assert op.kernel.threads_per_token == 16
     assert op.kernel.register_staging is True
     assert op.kernel.shared_memory_bytes <= _C500_SHARED_MEMORY_LIMIT_BYTES
 
@@ -244,6 +245,7 @@ def test_per_channel_cast_fused_expand_output_sizes(
         ),
     )
     assert op.kernel.tile_k == 64
+    assert op.kernel.threads_per_token == 16
     assert op.kernel.register_staging is True
 
 

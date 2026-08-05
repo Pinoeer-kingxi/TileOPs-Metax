@@ -36,6 +36,22 @@ _CASES = {
         "num_tokens_out": 1024,
         "round_sf": True,
     },
+    "rescale-small": {
+        "x_shape": (128, 256),
+        "dtype": torch.float8_e4m3fn,
+        "with_rescale": True,
+        "with_expand": False,
+        "num_tokens_out": 128,
+        "round_sf": False,
+    },
+    "rescale-large": {
+        "x_shape": (4096, 7168),
+        "dtype": torch.float8_e4m3fn,
+        "with_rescale": True,
+        "with_expand": False,
+        "num_tokens_out": 4096,
+        "round_sf": False,
+    },
 }
 
 
@@ -121,6 +137,8 @@ def main() -> None:
         f"commit={commit} dirty={dirty} torch={torch.__version__} "
         f"device={torch.cuda.get_device_name(0)!r} case={args.case} staging={args.staging} "
         f"register_staging={register_staging} expected_workgroups={expected_workgroups} "
+        f"tile_k={kernel.tile_k} threads_per_token={kernel.threads_per_token} "
+        f"vec_k={kernel.tile_k // kernel.threads_per_token} "
         f"shared_bytes={kernel.shared_memory_bytes} "
         f"kernel_sha256={hashlib.sha256(source.read_bytes()).hexdigest()}"
     )

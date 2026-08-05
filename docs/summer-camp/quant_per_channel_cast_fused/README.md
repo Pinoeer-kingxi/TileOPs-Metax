@@ -955,7 +955,7 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 
 ### 10.1 真正吸收的 Kernel 优化
 
-从原始迁移提交 `967b65b` 到当前生产 Kernel，只有两项改变设备
+从原始迁移提交 `967b65b` 到当前生产 Kernel，有三类改变设备
 执行的性能优化。测试矩阵、固定基线、Benchmark、mcProfiler 和文档
 提高可信度和可复现性，但不应计为 Kernel 加速。
 
@@ -963,7 +963,8 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 |---|---|---|---|
 | Hidden tile | Rescale=256，BF16 Plain/Expand=128，FP32=64 | 四路径固定 `tile_k=64` | 与 augenstern C500 配置一致，也印证 ACoolFIsh 的 tile64 并行度结论；本地 22 组隔离 A/B 中 21 组降低 19.64%～72.94%，原本已是 tile64 的 FP32 用例持平 |
 | 输入 staging | 四路径都写入并重读 shared tile | Plain/Expand 使用 thread-local；Rescale 两路保留 shared | 吸收 augenstern `fa6bafe` 消融与 `87b083c` 最终策略；五组单变量 A/B 延迟降低 3.38%～76.78% |
-| 显式 shared/CTA | BF16 tile128 34,816 B；FP32 tile64 33,792 B；FP8 Rescale tile256 36,864 B | Plain/Expand 1,024 B；Rescale 9,216 B | Plain/Expand 删除输入 tile 的一次 shared store 和一次 shared load；加入 C500 64 KiB 预算门禁 |
+| 每token线程/向量宽度 | 64/vec1 | Plain/Expand固定16/vec4；Rescale按规模使用8/vec8、16/vec4或32/vec2 | 两组独立10项消融均10/10胜出，几何平均分别为`1.2555x`和`1.2169x` |
+| 显式 shared/CTA | BF16 tile128 34,816 B；FP32 tile64 33,792 B；FP8 Rescale tile256 36,864 B | Plain/Expand 4 KiB；Rescale按分派为10/12/16 KiB | Plain/Expand删除输入tile的一次shared store/load；reduction scratch随向量宽度增加但仍远低于C500 64 KiB门禁 |
 | mcProfiler | shared-staging 对照 | Plain/Expand local staging | shared load `68,272 -> 4,016` (-94.12%)；store `66,766 -> 2,510` (-96.24%)；HBM 变化小于 0.1%；未观察到 private spill |
 | 计算语义 | 128-token 两遍 amax/量化 | 不变 | FLOPs、语义 HBM bytes、四个 Op 接口和 Roofline 公式均未改变 |
 
@@ -977,6 +978,10 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 - Rescale动态向量化已在当前Kernel上完成隔离消融并吸收：小规模使用
   `threads_per_token=8/vec_k=8`，中等规模使用`16/4`，大规模使用`32/2`。
   受影响的10项正式workload全部胜出，几何平均加速`1.2169x`。
+- Plain/Expand在保持thread-local staging和`tile_k=64`不变时进一步比较
+  vec1/vec2/vec4；vec4在10/10项正式workload胜出，几何平均加速`1.2555x`，
+  因此production固定`threads_per_token=16/vec_k=4`。动态`tile_k=128`在
+  Rescale两变体10项中胜出0/10并平均增加57.62%延迟，已完整回退。
 - ACoolFIsh 的 `shared_rows=120`、Op-side CUDA `F.pad`、动态 tile 分派、
   custom-op/fake/meta 和 `torch.compile` 都未采用。
 
@@ -1041,6 +1046,7 @@ production功能测试；`baselines`
 | plain/expand/rescale/rescale-expand | 完成 |
 | C500 全路径 `tile_k=64` | 完成；含 shared-memory 门禁 |
 | 混合 thread-local/shared staging | 完成；Plain/Expand local，Rescale shared |
+| 每token线程/向量宽度 | Plain/Expand固定16/vec4；Rescale按规模使用8/vec8、16/vec4或32/vec2 |
 | 正确性、边界、异常测试 | 单一production入口45项，C500全部通过 |
 | 固定基线测试 | 7 项通过 |
 | eager PyTorch 基线 | 完成并固定上游 SHA |
