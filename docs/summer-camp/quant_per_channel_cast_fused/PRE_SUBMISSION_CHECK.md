@@ -10,8 +10,9 @@
 - [ ] 课题完整简介：待小组确认最终课题范围后填写。
 - [ ] 算子认领 Issue：待填写本组 GitLink Issue 链接。
 - [ ] 小组编号与成员：待填写。
-- [ ] 确认 PR A 已合入 `summer-camp-2026`；已知过程 PR 为 GitLink `#18`，
-  但最终提交前仍须核对其合入状态和 Manifest 提交 SHA。
+- [x] GitLink PR A `#29` 已合入 `summer-camp-2026`。PR head 与最终 Manifest
+  提交均为 `81a39fda24291a2c42b0e6b5c64453bb4b78774f`；已验证该提交是
+  `summer-camp-2026@df672b398134cbffd73e83fb816c36602fc3f3cf` 的祖先。
 
 算子名称为 `quant_per_channel_cast_fused`，改动类型为 `optimize`。最终 PR 标题
 应采用：
