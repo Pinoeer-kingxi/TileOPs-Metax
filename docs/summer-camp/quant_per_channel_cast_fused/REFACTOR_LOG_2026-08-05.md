@@ -213,3 +213,27 @@ workload执行旧/新production-only同协议A/B，未重复运行eager、`torch
 ```text
 /data/gxy/TileOPs-Metax-team-results/txy-vectorized-ab-2026-08-05/
 ```
+
+### 后续消融：保持 tile64，并为 Plain/Expand 吸收 vec4
+
+以`217d3c9`建立`backup/quant-before-dynamic-tilek-217d3c9`回退锚点，并阅读
+项目同级的mcProfiler V06和mcTracer V08手册。硬件计数选择mcProfiler；
+mcTracer保留用于后续Runtime API、同步和多Kernel时间线诊断。
+
+- Rescale的vec8/vec4/vec2各完成一组mcProfiler采样，Private Read/Write均为0，
+  未观察到private spill。首次采样因代理转发localhost返回502，清除代理并设置
+  `NO_PROXY=127.0.0.1,localhost`后恢复。
+- `tile_k=128`在Rescale/RescaleExpand 10项正式workload中胜出0/10，平均增加
+  57.62%延迟，因此回退，四路径继续固定`tile_k=64`。
+- Plain/Expand保持thread-local staging，仅比较64/32/16 threads/token，分别
+  对应vec1/vec2/vec4。vec4在10/10项胜出，几何平均加速`1.2555x`，单项范围
+  `1.1253x–1.3922x`，因此production采用16 threads/token。
+- vec4没有增加每线程local元素数量（仍为32），显式reduction shared memory为
+  4 KiB。完整正确性为`45 passed in 55.89s`。
+
+三个外部性能基线的代码和结果未改变，本轮按约定不重复运行。原始日志、Profiler
+报告与汇总位于：
+
+```text
+/data/gxy/TileOPs-Metax-team-results/dynamic-tilek-2026-08-05/
+```
