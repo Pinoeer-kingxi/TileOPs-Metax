@@ -6,7 +6,7 @@ tilelang_root=${TILELANG_ROOT:-/opt/tilelang-metax-v0.1.10}
 export PYTHONPATH="${tilelang_root}:${repo_root}${PYTHONPATH:+:${PYTHONPATH}}"
 
 usage() {
-    echo "usage: $0 {smoke|correctness|baselines|benchmark|gates|profile|profile-driver} [args...]" >&2
+    echo "usage: $0 {smoke|matrix|correctness|baselines|benchmark|gates|profile|profile-driver} [args...]" >&2
 }
 
 command_name=${1:-}
@@ -19,10 +19,19 @@ shift
 cd "${repo_root}"
 case "${command_name}" in
     smoke)
-        python -m pytest -q -m smoke tests/ops/test_per_channel_cast_fused.py "$@"
+        python -m pytest -q -m smoke \
+            tests/ops/test_per_channel_cast_fused.py \
+            tests/ops/test_per_channel_cast_fused_augenstern.py \
+            "$@"
+        ;;
+    matrix)
+        python -m pytest -q tests/ops/test_per_channel_cast_fused_augenstern.py "$@"
         ;;
     correctness)
-        python -m pytest -q tests/ops/test_per_channel_cast_fused.py "$@"
+        python -m pytest -q \
+            tests/ops/test_per_channel_cast_fused.py \
+            tests/ops/test_per_channel_cast_fused_augenstern.py \
+            "$@"
         ;;
     baselines)
         python -m pytest -q tests/ops/test_per_channel_cast_fused_baselines.py "$@"
@@ -43,6 +52,7 @@ case "${command_name}" in
             tileops/ops/quant/per_channel_cast_fused.py \
             tileops/testing/per_channel_cast_fused.py \
             tests/ops/test_per_channel_cast_fused.py \
+            tests/ops/test_per_channel_cast_fused_augenstern.py \
             tests/ops/test_per_channel_cast_fused_baselines.py \
             benchmarks/ops/bench_per_channel_cast_fused.py \
             benchmarks/ops/per_channel_cast_fused_baselines.py \
