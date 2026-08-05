@@ -42,11 +42,11 @@ def _per_channel_cast_fused_kernel(
     round_sf: bool,
 ):
     tile_m = _NUM_PER_TOKENS
-    # A 128x128 FP32 staging tile plus the reduction scratch exceeds the
-    # C500's 64 KiB shared-memory limit. Splitting only the hidden tile keeps
-    # the full 128-token scale block intact while reducing shared memory to
-    # about 33 KiB for the FP32 path.
-    tile_k = 256 if with_rescale else (64 if in_dtype == "float32" else 128)
+    # The staging tile is register-resident (no shared memory), so the FP32
+    # path no longer needs the 64 KiB shared-memory workaround. The rescale
+    # path keeps tile_k = 128 (instead of 256) so each thread's register
+    # tile stays at 32x2 elements and does not spill.
+    tile_k = 128 if with_rescale else (64 if in_dtype == "float32" else 128)
     vec_k = tile_k // _NUM_THREADS_PER_TOKEN
     vec_m = tile_m * _NUM_THREADS_PER_TOKEN // _NUM_THREADS
     token_groups = _NUM_THREADS // _NUM_THREADS_PER_TOKEN
@@ -81,7 +81,11 @@ def _per_channel_cast_fused_kernel(
             T.ceildiv(hidden, tile_k),
             threads=_NUM_THREADS,
         ) as (pid_token, pid_hidden):
-            x_shared = T.alloc_shared((tile_m, tile_k), in_dtype)
+            # Register-resident staging tile: each thread keeps its own
+            # vec_m x vec_k elements in registers instead of round-tripping
+            # through shared memory. The amax reduction only needs a
+            # wavefront-wide shuffle, so no block-level barrier is required.
+            x_local = T.alloc_local((vec_m, vec_k), in_dtype)
             pos_to_token_local = T.alloc_local((vec_m,), T.int32)
             sf_invs_local = T.alloc_local((vec_m,), T.float32)
             amax_local = T.alloc_local((vec_k,), T.float32)
@@ -121,7 +125,7 @@ def _per_channel_cast_fused_kernel(
                         sf_invs_local[i] = 0.0
 
             T.clear(amax_local)
-            for i in T.serial(vec_m):
+            for i in T.unroll(vec_m):
                 out_token = m_offset + i
                 source_token = out_token
                 if with_expand:
@@ -129,7 +133,7 @@ def _per_channel_cast_fused_kernel(
                 if out_token < num_tokens_out and source_token >= 0:
                     for j in T.vectorized(vec_k):
                         in_local[j] = x[source_token, k_offset + j]
-                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = in_local[j]
+                        x_local[i, j] = in_local[j]
                     for j in T.vectorized(vec_k):
                         logical_value = T.cast(in_local[j], T.float32)
                         if with_rescale:
@@ -137,7 +141,7 @@ def _per_channel_cast_fused_kernel(
                         amax_local[j] = T.max(amax_local[j], T.abs(logical_value))
                 else:
                     for j in T.vectorized(vec_k):
-                        x_shared[m_id * vec_m + i, k_id * vec_k + j] = 0.0
+                        x_local[i, j] = 0.0
 
             sf = T.alloc_var(T.float32)
             sf_inv = T.alloc_var(T.float32)
@@ -150,10 +154,10 @@ def _per_channel_cast_fused_kernel(
                     out_sf[pid_token, k_offset + i] = sf
                 amax_local[i] = sf_inv
 
-            for i in T.serial(vec_m):
+            for i in T.unroll(vec_m):
                 out_token = m_offset + i
                 for j in T.vectorized(vec_k):
-                    in_local[j] = x_shared[m_id * vec_m + i, k_id * vec_k + j]
+                    in_local[j] = x_local[i, j]
                 for j in T.vectorized(vec_k):
                     logical_value = T.cast(in_local[j], T.float32)
                     if with_rescale:
