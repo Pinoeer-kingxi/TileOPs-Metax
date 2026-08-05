@@ -4,6 +4,10 @@
 TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLang Kernel
 计算过程、访存模型、正确性测试、Benchmark、mcProfiler 和 Roofline 实测。
 
+最终 GitLink PR B 的逐项提交检查见
+[`PRE_SUBMISSION_CHECK.md`](PRE_SUBMISSION_CHECK.md)。其中尚需小组填写或在
+最终提交 SHA 上复跑的项目保持未勾选。
+
 迁移完成后的外部实现对比、`tile_k=64` 两轮 A/B、失败实验和分阶段开发
 计划见 [深度优化分析与开发计划](OPTIMIZATION_ANALYSIS.md)。
 
@@ -34,8 +38,10 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | augenstern 32 项性能矩阵适配提交 | `d85cb35` |
 | 精确 profiler metrics runner 提交 | `ec3f87d` |
 | Rescale shared 预算门禁提交 | `c9655a2` |
+| Rescale 动态向量化提交 | `217d3c9` |
+| Plain/Expand vec4 提交（当前测试代码） | `588a4de` |
 | mcProfiler 实测代码基线 | `ec3f87d6b357f9d97ab80cc49ee783ed4b4db742` |
-| 生产 Kernel SHA256 | `3b7df342a2dba2db0988210dc5aa608793cc708cc08bb35e748a1010e854d30c` |
+| 生产 Kernel SHA256 | `4693e4bac8b4bb30ed556a99060da006c58c6d043fc86979a31ff2ea14f213e2` |
 | 上游仓库 | `https://github.com/MetaX-MACA/TileKernels-Metax` |
 | 上游提交 | `0266ab740980de7dc03a828b8259cd73d100c2eb` |
 | 上游 TileLang 源码 | `tile_kernels/quant/per_channel_cast_fused_kernel.py` |
