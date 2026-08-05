@@ -19,7 +19,6 @@ from tileops.ops import (
     QuantPerChannelCastFusedRescaleExpandOp,
     QuantPerChannelCastFusedRescaleOp,
 )
-from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
 from workloads.per_channel_cast_fused import PerChannelCastFusedWorkload
 
 _PLAIN_OP = "QuantPerChannelCastFusedOp"
@@ -27,15 +26,10 @@ _EXPAND_OP = "QuantPerChannelCastFusedExpandOp"
 _RESCALE_OP = "QuantPerChannelCastFusedRescaleOp"
 _RESCALE_EXPAND_OP = "QuantPerChannelCastFusedRescaleExpandOp"
 
-
-def _is_stable_workload(workload: dict) -> bool:
-    return workload.get("__suite") != "augenstern-performance"
-
-
-_PLAIN_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_PLAIN_OP)))
-_EXPAND_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_EXPAND_OP)))
-_RESCALE_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_RESCALE_OP)))
-_RESCALE_EXPAND_WORKLOADS = list(filter(_is_stable_workload, load_workloads(_RESCALE_EXPAND_OP)))
+_PLAIN_WORKLOADS = load_workloads(_PLAIN_OP)
+_EXPAND_WORKLOADS = load_workloads(_EXPAND_OP)
+_RESCALE_WORKLOADS = load_workloads(_RESCALE_OP)
+_RESCALE_EXPAND_WORKLOADS = load_workloads(_RESCALE_EXPAND_OP)
 
 assert tuple(
     len(workloads)
@@ -45,7 +39,7 @@ assert tuple(
         _RESCALE_WORKLOADS,
         _RESCALE_EXPAND_WORKLOADS,
     )
-) == (3, 2, 2, 2)
+) == (5, 5, 5, 5)
 
 _OP_CLASSES = {
     _PLAIN_OP: QuantPerChannelCastFusedOp,
@@ -102,6 +96,76 @@ def _make_op(op_name: str, round_sf: bool):
     return op_cls(round_sf=round_sf)
 
 
+_FP8_MAX = 448.0
+_NUM_PER_TOKENS = 128
+_NUM_PER_CHANNELS = 128
+
+
+def _torch_eager_reference(
+    x: torch.Tensor,
+    x_sf_invs: torch.Tensor | None = None,
+    pos_to_token: torch.Tensor | None = None,
+    round_sf: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent benchmark-local PyTorch baseline."""
+    logical = x.to(torch.float32)
+    if x_sf_invs is not None:
+        logical = logical * x_sf_invs.repeat_interleave(_NUM_PER_CHANNELS, dim=1)
+    if pos_to_token is not None:
+        valid = pos_to_token >= 0
+        logical = logical[pos_to_token.clamp(min=0).long()]
+        logical = torch.where(valid[:, None], logical, torch.zeros_like(logical))
+
+    num_tokens_out, hidden = logical.shape
+    sf_rows = (num_tokens_out + _NUM_PER_TOKENS - 1) // _NUM_PER_TOKENS
+    padded_rows = sf_rows * _NUM_PER_TOKENS - num_tokens_out
+    if padded_rows:
+        logical_for_reduce = torch.cat(
+            (
+                logical,
+                torch.zeros((padded_rows, hidden), dtype=torch.float32, device=x.device),
+            ),
+            dim=0,
+        )
+    else:
+        logical_for_reduce = logical
+
+    amax = (
+        logical_for_reduce.reshape(sf_rows, _NUM_PER_TOKENS, hidden)
+        .abs()
+        .amax(dim=1)
+        .clamp(min=1e-4)
+    )
+    fp8_max = torch.full_like(amax, _FP8_MAX)
+    out_sf = amax / fp8_max
+    if round_sf:
+        rounded_bits = (out_sf.view(torch.int32) + 0x007FFFFF) & 0x7F800000
+        out_sf = rounded_bits.view(torch.float32)
+        quant_sf = out_sf.reciprocal()
+    else:
+        quant_sf = fp8_max / amax
+    quant_sf_per_token = quant_sf.repeat_interleave(_NUM_PER_TOKENS, dim=0)[
+        :num_tokens_out
+    ]
+    out = torch.clamp(logical * quant_sf_per_token, -_FP8_MAX, _FP8_MAX).to(
+        torch.float8_e4m3fn
+    )
+    return out.contiguous(), out_sf.contiguous()
+
+
+def _assert_quant_equal(actual, expected):
+    """Check quantized output and scale against a trusted reference."""
+    out, out_sf = actual
+    out_ref, out_sf_ref = expected
+
+    assert out.shape == out_ref.shape
+    assert out.dtype == torch.float8_e4m3fn
+    assert out_sf.shape == out_sf_ref.shape
+    assert out_sf.dtype == torch.float32
+    torch.testing.assert_close(out.float(), out_ref.float(), atol=0, rtol=0)
+    torch.testing.assert_close(out_sf, out_sf_ref, atol=1e-7, rtol=1e-6)
+
+
 def _make_reference(
     *,
     with_rescale: bool,
@@ -109,21 +173,21 @@ def _make_reference(
     round_sf: bool,
 ) -> Callable:
     if with_rescale and with_expand:
-        return lambda x, x_sf_invs, pos_to_token: per_channel_cast_fused_reference(
+        return lambda x, x_sf_invs, pos_to_token: _torch_eager_reference(
             x,
             x_sf_invs=x_sf_invs,
             pos_to_token=pos_to_token,
             round_sf=round_sf,
         )
     if with_rescale:
-        return lambda x, x_sf_invs: per_channel_cast_fused_reference(
+        return lambda x, x_sf_invs: _torch_eager_reference(
             x, x_sf_invs=x_sf_invs, round_sf=round_sf
         )
     if with_expand:
-        return lambda x, pos_to_token: per_channel_cast_fused_reference(
+        return lambda x, pos_to_token: _torch_eager_reference(
             x, pos_to_token=pos_to_token, round_sf=round_sf
         )
-    return lambda x: per_channel_cast_fused_reference(x, round_sf=round_sf)
+    return lambda x: _torch_eager_reference(x, round_sf=round_sf)
 
 
 def _make_tilelang_baseline(
@@ -179,14 +243,6 @@ def _make_shared_staging_baseline(
     return lambda x: kernel(x)
 
 
-def _assert_quant_equal(
-    actual: tuple[torch.Tensor, torch.Tensor],
-    expected: tuple[torch.Tensor, torch.Tensor],
-) -> None:
-    torch.testing.assert_close(actual[0].float(), expected[0].float(), atol=0, rtol=0)
-    torch.testing.assert_close(actual[1], expected[1], atol=1e-7, rtol=1e-6)
-
-
 def _make_manifest_benchmark(op_name: str, op, workload):
     try:
         factory = _BENCHMARK_FACTORIES[op_name]
@@ -223,6 +279,7 @@ def test_per_channel_cast_fused_bench(
         with_expand=with_expand,
         round_sf=round_sf,
     )
+    compiled_reference = torch.compile(reference, fullgraph=True)
     tilelang_baseline = _make_tilelang_baseline(
         hidden=x_shape[1],
         in_dtype=dtype,
@@ -241,10 +298,11 @@ def test_per_channel_cast_fused_bench(
         )
     benchmark = _make_manifest_benchmark(op_name, op, workload)
 
-    # Establish correctness before timing and compile both TileLang kernels so
-    # JIT time is excluded. The PyTorch path remains eager by design.
+    # Establish correctness before timing. Compile TileLang and torch.compile
+    # paths here so JIT/graph compilation time is excluded from steady-state timing.
     expected = reference(*inputs)
     _assert_quant_equal(op(*inputs), expected)
+    _assert_quant_equal(compiled_reference(*inputs), expected)
     _assert_quant_equal(tilelang_baseline(*inputs), expected)
     if shared_staging_baseline is not None:
         _assert_quant_equal(shared_staging_baseline(*inputs), expected)
@@ -255,6 +313,9 @@ def test_per_channel_cast_fused_bench(
 
     if shared_staging_baseline is not None:
         result_shared = benchmark.profile(shared_staging_baseline, *inputs)
+        result_shared["speedup_vs_tileops"] = (
+            result_shared["latency_ms"] / result["latency_ms"]
+        )
         BenchmarkReport.record(
             op_name,
             locals(),
@@ -263,9 +324,23 @@ def test_per_channel_cast_fused_bench(
         )
 
     result_tilelang = benchmark.profile(tilelang_baseline, *inputs)
-    BenchmarkReport.record(op_name, locals(), result_tilelang, tag="tilelang-baseline")
+    result_tilelang["speedup_vs_tileops"] = (
+        result_tilelang["latency_ms"] / result["latency_ms"]
+    )
+    BenchmarkReport.record(op_name, locals(), result_tilelang, tag="tilekernels-tilelang")
+
+    result_compiled = benchmark.profile(compiled_reference, *inputs)
+    result_compiled["speedup_vs_tileops"] = (
+        result_compiled["latency_ms"] / result["latency_ms"]
+    )
+    BenchmarkReport.record(
+        op_name, locals(), result_compiled, tag="torch-compile"
+    )
 
     result_ref = benchmark.profile(reference, *inputs)
+    result_ref["speedup_vs_tileops"] = (
+        result_ref["latency_ms"] / result["latency_ms"]
+    )
     BenchmarkReport.record(op_name, locals(), result_ref, tag="torch-eager")
 
 

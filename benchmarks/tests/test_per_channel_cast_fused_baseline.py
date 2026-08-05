@@ -1,4 +1,4 @@
-"""Correctness tests for the pinned eager-PyTorch and TileLang baselines."""
+"""Credibility tests for the pinned TileKernels performance baseline."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import pytest
 import torch
 
 from benchmarks.ops.per_channel_cast_fused_baselines import (
-    TILE_K,
+    tile_k_for,
     UPSTREAM_COMMIT,
     UPSTREAM_KERNEL_SHA256,
     UPSTREAM_TORCH_REFERENCE_SHA256,
     PerChannelCastFusedTileLangBaseline,
 )
-from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
+from benchmarks.ops.bench_per_channel_cast_fused import _torch_eager_reference
 
 
 def _make_fp8(shape: tuple[int, int]) -> torch.Tensor:
@@ -43,7 +43,9 @@ def test_per_channel_cast_fused_baseline_provenance_is_pinned() -> None:
     assert UPSTREAM_TORCH_REFERENCE_SHA256 == (
         "6af7609cf7462619dd902845bc17aad5402b5fe4f3c3c8eb4a6670a4e62a481f"
     )
-    assert TILE_K == 64
+    assert tile_k_for(torch.bfloat16, with_rescale=False) == 128
+    assert tile_k_for(torch.float32, with_rescale=False) == 64
+    assert tile_k_for(torch.float8_e4m3fn, with_rescale=True) == 256
 
 
 @pytest.mark.parametrize(
@@ -102,7 +104,7 @@ def test_per_channel_cast_fused_tilelang_baseline_matches_torch_eager(
         x_sf_invs=x_sf_invs,
         pos_to_token=pos_to_token,
     )
-    expected = per_channel_cast_fused_reference(
+    expected = _torch_eager_reference(
         x,
         x_sf_invs=x_sf_invs,
         pos_to_token=pos_to_token,
@@ -112,9 +114,9 @@ def test_per_channel_cast_fused_tilelang_baseline_matches_torch_eager(
 
 
 @pytest.mark.smoke
-def test_per_channel_cast_fused_tilelang_baseline_rejects_partial_scale_block() -> None:
+def test_per_channel_cast_fused_tilelang_baseline_rejects_invalid_expand_alignment() -> None:
     x = torch.randn((64, 128), dtype=torch.bfloat16, device="cuda")
-    pos_to_token = torch.arange(144, dtype=torch.int32, device="cuda") % x.shape[0]
+    pos_to_token = torch.arange(15, dtype=torch.int32, device="cuda") % x.shape[0]
     baseline = PerChannelCastFusedTileLangBaseline(
         hidden=x.shape[1],
         in_dtype=x.dtype,

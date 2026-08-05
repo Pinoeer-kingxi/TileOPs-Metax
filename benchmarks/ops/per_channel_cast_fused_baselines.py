@@ -1,11 +1,16 @@
 # 2026 - Modified by MetaX Integrated Circuits (Shanghai) Co., Ltd. All Rights Reserved.
 
-"""Pinned baselines for the per-channel fused-cast benchmark.
+"""Pinned TileKernels baseline for the per-channel fused-cast benchmark.
 
 The TileLang baseline follows MetaX-MACA/TileKernels-Metax ``dev`` at the
-commit recorded below. Its only scheduling change is ``tile_k=64``: the
-upstream FP32 ``tile_k=128`` layout needs about 66 KiB of explicit shared
-memory and cannot fit within the C500's 64 KiB workgroup limit.
+commit recorded below. It preserves the upstream schedule:
+
+* plain/expand BF16: ``tile_k=128``;
+* rescale/rescale-expand FP8: ``tile_k=256``.
+
+The sole scheduling compatibility change is plain/expand FP32
+``tile_k=128 -> 64``. The unmodified layout needs 67,584 bytes of explicit
+shared memory and cannot fit within the C500's 65,536-byte workgroup limit.
 
 This module is intentionally independent from the TileOPs kernel so later
 optimizations cannot silently move the performance baseline.
@@ -19,14 +24,8 @@ import tilelang
 import tilelang.language as T
 import torch
 
-from tileops.testing.per_channel_cast_fused import (
-    UPSTREAM_COMMIT,
-    UPSTREAM_TORCH_REFERENCE_PATH,
-    UPSTREAM_TORCH_REFERENCE_SHA256,
-)
-
 __all__ = [
-    "TILE_K",
+    "tile_k_for",
     "UPSTREAM_COMMIT",
     "UPSTREAM_KERNEL_PATH",
     "UPSTREAM_KERNEL_SHA256",
@@ -36,17 +35,30 @@ __all__ = [
     "PerChannelCastFusedTileLangBaseline",
 ]
 
+UPSTREAM_COMMIT = "0266ab740980de7dc03a828b8259cd73d100c2eb"
+UPSTREAM_TORCH_REFERENCE_PATH = "tile_kernels/torch/per_channel_cast_fused.py"
+UPSTREAM_TORCH_REFERENCE_SHA256 = "6af7609cf7462619dd902845bc17aad5402b5fe4f3c3c8eb4a6670a4e62a481f"
+
 UPSTREAM_REPOSITORY = "https://github.com/MetaX-MACA/TileKernels-Metax"
 UPSTREAM_KERNEL_PATH = "tile_kernels/quant/per_channel_cast_fused_kernel.py"
 UPSTREAM_KERNEL_SHA256 = "64e7ad56bd8ea125c561b1726a1cdf13ce78bf722cb9bef520452026157edafc"
 
 TILE_M = 128
-TILE_K = 64
 NUM_THREADS = 256
 NUM_THREADS_PER_TOKEN = 64
 NUM_PER_CHANNELS = 128
 FP8_MAX = 448.0
 MIN_AMAX = 1e-4
+
+
+def tile_k_for(in_dtype: torch.dtype | str, *, with_rescale: bool) -> int:
+    """Return upstream ``tile_k``, except for the C500-infeasible FP32 path."""
+    dtype_name = str(in_dtype).removeprefix("torch.")
+    if with_rescale:
+        return 256
+    if dtype_name == "float32":
+        return 64
+    return 128
 
 
 def _source_token(with_expand: bool, index: int, token: int, positions):
@@ -67,10 +79,11 @@ def _get_tilelang_baseline_kernel(
     with_expand: bool,
     round_sf: bool,
 ):
-    """Build the pinned upstream-style kernel with the C500-safe tile."""
+    """Build the pinned upstream kernel with only the required FP32 tile fix."""
     num_tokens = T.dynamic("baseline_num_tokens")
     num_tokens_out = T.dynamic("baseline_num_tokens_out")
-    vec_k = TILE_K // NUM_THREADS_PER_TOKEN
+    tile_k = tile_k_for(in_dtype, with_rescale=with_rescale)
+    vec_k = tile_k // NUM_THREADS_PER_TOKEN
     vec_m = TILE_M * NUM_THREADS_PER_TOKEN // NUM_THREADS
 
     @T.macro
@@ -100,10 +113,10 @@ def _get_tilelang_baseline_kernel(
     ):
         with T.Kernel(
             T.ceildiv(num_tokens_out, TILE_M),
-            T.ceildiv(hidden, TILE_K),
+            T.ceildiv(hidden, tile_k),
             threads=NUM_THREADS,
         ) as (pid_token, pid_hidden):
-            x_shared = T.alloc_shared((TILE_M, TILE_K), in_dtype)
+            x_shared = T.alloc_shared((TILE_M, tile_k), in_dtype)
             pos_to_token_local = T.alloc_local((vec_m,), T.int32)
             sf_invs_local = T.alloc_local((vec_m,), T.float32)
             amax_local = T.alloc_local((vec_k,), T.float32)
@@ -115,7 +128,7 @@ def _get_tilelang_baseline_kernel(
             m_id = tid // NUM_THREADS_PER_TOKEN
             k_id = tid % NUM_THREADS_PER_TOKEN
             m_offset = pid_token * TILE_M + m_id * vec_m
-            k_offset = pid_hidden * TILE_K + k_id * vec_k
+            k_offset = pid_hidden * tile_k + k_id * vec_k
             logical_value = T.alloc_var(T.float32)
 
             if with_expand:
@@ -139,7 +152,7 @@ def _get_tilelang_baseline_kernel(
                         0.0,
                         x_sf_invs[
                             source_token,
-                            (pid_hidden * TILE_K + k_id * vec_k) // NUM_PER_CHANNELS,
+                            (pid_hidden * tile_k + k_id * vec_k) // NUM_PER_CHANNELS,
                         ],
                     )
 
@@ -173,7 +186,7 @@ def _get_tilelang_baseline_kernel(
             sf = 0.0
             sf_inv = 0.0
             col_id = tid % NUM_THREADS_PER_TOKEN * vec_k + tid // NUM_THREADS_PER_TOKEN
-            if tid < TILE_K:
+            if tid < tile_k:
                 for i in T.serial(
                     col_id // vec_k,
                     NUM_THREADS,
@@ -181,7 +194,7 @@ def _get_tilelang_baseline_kernel(
                 ):
                     sf = T.max(sf, amax_shared[col_id % vec_k, i])
                 sf, sf_inv = _scale_and_inverse(sf)
-                out_sf[pid_token, pid_hidden * TILE_K + col_id] = sf
+                out_sf[pid_token, pid_hidden * tile_k + col_id] = sf
                 amax_shared[0, tid] = sf_inv
 
             for i in T.serial(vec_k):
@@ -213,10 +226,13 @@ class PerChannelCastFusedTileLangBaseline:
         with_expand: bool,
         round_sf: bool,
     ) -> None:
-        if hidden <= 0 or hidden % TILE_K != 0:
-            raise ValueError(f"hidden must be positive and divisible by {TILE_K}, got {hidden}")
         self.with_rescale = with_rescale
         self.with_expand = with_expand
+        self.tile_k = tile_k_for(in_dtype, with_rescale=with_rescale)
+        if hidden <= 0 or hidden % self.tile_k != 0:
+            raise ValueError(
+                f"hidden must be positive and divisible by {self.tile_k}, got {hidden}"
+            )
         self.kernel = _get_tilelang_baseline_kernel(
             hidden,
             str(in_dtype).removeprefix("torch."),
@@ -237,10 +253,14 @@ class PerChannelCastFusedTileLangBaseline:
             raise ValueError("pos_to_token is required for the expand baseline")
 
         num_tokens_out = pos_to_token.shape[0] if self.with_expand else x.shape[0]
-        if num_tokens_out % TILE_M != 0:
+        # The pinned upstream schedule has no masked TILE_M tail path.  Keep
+        # performance comparisons on complete 128-token tiles even though the
+        # production TileOP supports the broader 16-token Expand contract.
+        required_alignment = TILE_M
+        if num_tokens_out % required_alignment != 0:
             raise ValueError(
                 "the pinned upstream-style TileLang baseline requires "
-                f"num_tokens_out divisible by {TILE_M}, got {num_tokens_out}"
+                f"num_tokens_out divisible by {required_alignment}, got {num_tokens_out}"
             )
 
         out = torch.empty(
@@ -249,7 +269,7 @@ class PerChannelCastFusedTileLangBaseline:
             device=x.device,
         )
         out_sf = torch.empty(
-            (num_tokens_out // TILE_M, x.shape[1]),
+            ((num_tokens_out + TILE_M - 1) // TILE_M, x.shape[1]),
             dtype=torch.float32,
             device=x.device,
         )
