@@ -28,6 +28,7 @@ class _QuantPerChannelCastFusedBase(Op):
 
     def __init__(
         self,
+        *,
         fmt: str = "e4m3",
         num_per_tokens: int = 128,
         num_per_channels: Optional[int] = None,
@@ -208,6 +209,7 @@ class QuantPerChannelCastFusedOp(_QuantPerChannelCastFusedBase):
 
     def __init__(
         self,
+        *,
         fmt: str = "e4m3",
         num_per_tokens: int = 128,
         round_sf: bool = False,
@@ -250,6 +252,7 @@ class QuantPerChannelCastFusedExpandOp(_QuantPerChannelCastFusedBase):
 
     def __init__(
         self,
+        *,
         fmt: str = "e4m3",
         num_per_tokens: int = 128,
         round_sf: bool = False,
@@ -308,6 +311,7 @@ class QuantPerChannelCastFusedRescaleOp(_QuantPerChannelCastFusedBase):
 
     def __init__(
         self,
+        *,
         fmt: str = "e4m3",
         num_per_tokens: int = 128,
         num_per_channels: int = 128,
@@ -364,6 +368,7 @@ class QuantPerChannelCastFusedRescaleExpandOp(_QuantPerChannelCastFusedBase):
 
     def __init__(
         self,
+        *,
         fmt: str = "e4m3",
         num_per_tokens: int = 128,
         num_per_channels: int = 128,

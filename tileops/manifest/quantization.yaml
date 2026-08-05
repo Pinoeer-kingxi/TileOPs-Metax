@@ -110,9 +110,9 @@ QuantPerChannelCastFusedOp:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
       out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
-      fmt: {type: str, default: "e4m3"}
-      num_per_tokens: {type: int, default: 128}
-      round_sf: {type: bool, default: false}
+      fmt: {type: str, default: "e4m3", kw_only: true}
+      num_per_tokens: {type: int, default: 128, kw_only: true}
+      round_sf: {type: bool, default: false, kw_only: true}
     shape_rules:
     - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
@@ -125,19 +125,11 @@ QuantPerChannelCastFusedOp:
     # rounded up to the nearest power of two. out stores x / out_sf in e4m3.
 
   workloads:
-  - {x_shape: [128, 1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-bf16"}
-  - {x_shape: [1024, 4096], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "medium-rounded-bf16"}
-  - {x_shape: [4096, 8192], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "large-fp32"}
-  # Broader source-compatibility performance suite. The stable four-way A/B
-  # benchmark above remains unchanged and filters out this tagged matrix.
-  - {x_shape: [128, 128], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "tiny-boundary-bf16", __suite: augenstern-performance}
-  - {x_shape: [256, 512], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "small-rounded-bf16", __suite: augenstern-performance}
-  - {x_shape: [512, 512], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-bf16", __suite: augenstern-performance}
-  - {x_shape: [1024, 3072], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "medium-fp32", __suite: augenstern-performance}
-  - {x_shape: [2048, 1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "mid-token-fp32", __suite: augenstern-performance}
-  - {x_shape: [4096, 7168], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "deepseek-v3-bf16", __suite: augenstern-performance}
-  - {x_shape: [4096, 3072], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "qwen3-rounded-fp32", __suite: augenstern-performance}
-  - {x_shape: [8192, 7168], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "large-token-rounded-bf16", __suite: augenstern-performance}
+  - {x_shape: [128, 128], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "tiny-boundary-bf16"}
+  - {x_shape: [512, 512], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-bf16"}
+  - {x_shape: [1024, 3072], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "medium-fp32"}
+  - {x_shape: [4096, 7168], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "deepseek-v3-bf16"}
+  - {x_shape: [4096, 3072], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "qwen3-rounded-fp32"}
 
   roofline:
     vars:
@@ -170,9 +162,9 @@ QuantPerChannelCastFusedExpandOp:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
       out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
-      fmt: {type: str, default: "e4m3"}
-      num_per_tokens: {type: int, default: 128}
-      round_sf: {type: bool, default: false}
+      fmt: {type: str, default: "e4m3", kw_only: true}
+      num_per_tokens: {type: int, default: 128, kw_only: true}
+      round_sf: {type: bool, default: false, kw_only: true}
     shape_rules:
     - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
@@ -184,16 +176,11 @@ QuantPerChannelCastFusedExpandOp:
     # zero row before per-channel scaling.
 
   workloads:
-  - {x_shape: [512, 4096], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "gather-bf16"}
-  - {x_shape: [1024, 4096], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "gather-rounded-fp32"}
-  - {x_shape: [17, 128], pos_to_token_shape: [32], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "tiny-expand-bf16", __suite: augenstern-performance}
-  - {x_shape: [137, 512], pos_to_token_shape: [144], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "near-one-expand-rounded-bf16", __suite: augenstern-performance}
-  - {x_shape: [513, 512], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-expand-bf16", __suite: augenstern-performance}
-  - {x_shape: [513, 3072], pos_to_token_shape: [4096], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "high-ratio-expand-fp32", __suite: augenstern-performance}
-  - {x_shape: [1001, 3072], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [float32], label: "medium-expand-fp32", __suite: augenstern-performance}
-  - {x_shape: [4001, 7168], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "moe-expand-bf16", __suite: augenstern-performance}
-  - {x_shape: [4001, 3072], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "moe-expand-rounded-fp32", __suite: augenstern-performance}
-  - {x_shape: [4097, 7168], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "large-tail-expand-rounded-bf16", __suite: augenstern-performance}
+  - {x_shape: [17, 128], pos_to_token_shape: [128], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "tiny-expand-bf16"}
+  - {x_shape: [137, 512], pos_to_token_shape: [256], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [bfloat16], label: "near-one-expand-rounded-bf16"}
+  - {x_shape: [513, 512], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "small-expand-bf16"}
+  - {x_shape: [1001, 3072], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, round_sf: true, dtypes: [float32], label: "medium-expand-rounded-fp32"}
+  - {x_shape: [4001, 7168], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, round_sf: false, dtypes: [bfloat16], label: "moe-expand-bf16"}
 
   roofline:
     vars:
@@ -226,10 +213,10 @@ QuantPerChannelCastFusedRescaleOp:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens, hidden]"}
       out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
-      fmt: {type: str, default: "e4m3"}
-      num_per_tokens: {type: int, default: 128}
-      num_per_channels: {type: int, default: 128}
-      round_sf: {type: bool, default: false}
+      fmt: {type: str, default: "e4m3", kw_only: true}
+      num_per_tokens: {type: int, default: 128, kw_only: true}
+      num_per_channels: {type: int, default: 128, kw_only: true}
+      round_sf: {type: bool, default: false, kw_only: true}
     shape_rules:
     - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
@@ -243,16 +230,11 @@ QuantPerChannelCastFusedRescaleOp:
     # x[t, h] * x_sf_invs[t, h // num_per_channels].
 
   workloads:
-  - {x_shape: [128, 1024], x_sf_invs_shape: [128, 8], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "small-fp8-rescale"}
-  - {x_shape: [1024, 4096], x_sf_invs_shape: [1024, 32], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-fp8-rescale-rounded"}
-  - {x_shape: [128, 256], x_sf_invs_shape: [128, 2], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "tiny-rescale", __suite: augenstern-performance}
-  - {x_shape: [256, 512], x_sf_invs_shape: [256, 4], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "small-boundary-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [512, 512], x_sf_invs_shape: [512, 4], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "small-rescale", __suite: augenstern-performance}
-  - {x_shape: [1024, 3072], x_sf_invs_shape: [1024, 24], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [2048, 1024], x_sf_invs_shape: [2048, 8], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "mid-token-rescale", __suite: augenstern-performance}
-  - {x_shape: [4096, 7168], x_sf_invs_shape: [4096, 56], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "deepseek-v3-rescale", __suite: augenstern-performance}
-  - {x_shape: [4096, 3072], x_sf_invs_shape: [4096, 24], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "qwen3-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [8192, 7168], x_sf_invs_shape: [8192, 56], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "large-token-rescale-rounded", __suite: augenstern-performance}
+  - {x_shape: [128, 256], x_sf_invs_shape: [128, 2], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "tiny-rescale"}
+  - {x_shape: [256, 512], x_sf_invs_shape: [256, 4], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "small-boundary-rescale-rounded"}
+  - {x_shape: [1024, 3072], x_sf_invs_shape: [1024, 24], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-rescale-rounded"}
+  - {x_shape: [4096, 7168], x_sf_invs_shape: [4096, 56], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "deepseek-v3-rescale"}
+  - {x_shape: [8192, 7168], x_sf_invs_shape: [8192, 56], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "large-token-rescale-rounded"}
 
   roofline:
     vars:
@@ -287,10 +269,10 @@ QuantPerChannelCastFusedRescaleExpandOp:
       out: {dtype: "float8_e4m3fn", shape: "[num_tokens_out, hidden]"}
       out_sf: {dtype: "float32", shape: "[sf_rows, hidden]"}
     params:
-      fmt: {type: str, default: "e4m3"}
-      num_per_tokens: {type: int, default: 128}
-      num_per_channels: {type: int, default: 128}
-      round_sf: {type: bool, default: false}
+      fmt: {type: str, default: "e4m3", kw_only: true}
+      num_per_tokens: {type: int, default: 128, kw_only: true}
+      num_per_channels: {type: int, default: 128, kw_only: true}
+      round_sf: {type: bool, default: false, kw_only: true}
     shape_rules:
     - "fmt == 'e4m3'"
     - "num_per_tokens == 128"
@@ -305,16 +287,11 @@ QuantPerChannelCastFusedRescaleExpandOp:
     # padding sentinels and contribute zeros.
 
   workloads:
-  - {x_shape: [512, 4096], x_sf_invs_shape: [512, 32], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8"}
-  - {x_shape: [1024, 4096], x_sf_invs_shape: [1024, 32], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "gather-rescale-fp8-rounded"}
-  - {x_shape: [17, 256], x_sf_invs_shape: [17, 2], pos_to_token_shape: [32], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "tiny-expand-rescale", __suite: augenstern-performance}
-  - {x_shape: [137, 512], x_sf_invs_shape: [137, 4], pos_to_token_shape: [144], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "near-one-expand-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [513, 512], x_sf_invs_shape: [513, 4], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "small-expand-rescale", __suite: augenstern-performance}
-  - {x_shape: [513, 3072], x_sf_invs_shape: [513, 24], pos_to_token_shape: [4096], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "high-ratio-expand-rescale", __suite: augenstern-performance}
-  - {x_shape: [1001, 3072], x_sf_invs_shape: [1001, 24], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-expand-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [4001, 7168], x_sf_invs_shape: [4001, 56], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "moe-expand-rescale", __suite: augenstern-performance}
-  - {x_shape: [4001, 3072], x_sf_invs_shape: [4001, 24], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "moe-expand-rescale-rounded", __suite: augenstern-performance}
-  - {x_shape: [4097, 7168], x_sf_invs_shape: [4097, 56], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "large-tail-expand-rescale-rounded", __suite: augenstern-performance}
+  - {x_shape: [17, 256], x_sf_invs_shape: [17, 2], pos_to_token_shape: [128], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "tiny-expand-rescale"}
+  - {x_shape: [137, 512], x_sf_invs_shape: [137, 4], pos_to_token_shape: [256], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "near-one-expand-rescale-rounded"}
+  - {x_shape: [513, 512], x_sf_invs_shape: [513, 4], pos_to_token_shape: [1024], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "small-expand-rescale"}
+  - {x_shape: [1001, 3072], x_sf_invs_shape: [1001, 24], pos_to_token_shape: [2048], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: true, dtypes: [float8_e4m3fn], label: "medium-expand-rescale-rounded"}
+  - {x_shape: [4001, 7168], x_sf_invs_shape: [4001, 56], pos_to_token_shape: [8192], fmt: e4m3, num_per_tokens: 128, num_per_channels: 128, round_sf: false, dtypes: [float8_e4m3fn], label: "moe-expand-rescale"}
 
   roofline:
     vars:

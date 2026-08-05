@@ -15,7 +15,74 @@ from tileops.ops import (
     QuantPerChannelCastFusedRescaleExpandOp,
     QuantPerChannelCastFusedRescaleOp,
 )
-from tileops.testing.per_channel_cast_fused import per_channel_cast_fused_reference
+
+
+_FP8_MAX = 448.0
+_NUM_PER_TOKENS = 128
+_NUM_PER_CHANNELS = 128
+
+
+def per_channel_cast_fused_reference(
+    x: torch.Tensor,
+    x_sf_invs: torch.Tensor | None = None,
+    pos_to_token: torch.Tensor | None = None,
+    round_sf: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Independent PyTorch correctness oracle for all four variants."""
+    logical = x.to(torch.float32)
+    if x_sf_invs is not None:
+        logical = logical * x_sf_invs.repeat_interleave(_NUM_PER_CHANNELS, dim=1)
+    if pos_to_token is not None:
+        if x.shape[0] == 0:
+            logical = torch.zeros(
+                (pos_to_token.shape[0], x.shape[1]),
+                dtype=torch.float32,
+                device=x.device,
+            )
+        else:
+            valid = pos_to_token >= 0
+            logical = logical[pos_to_token.clamp(min=0).long()]
+            logical = torch.where(valid[:, None], logical, torch.zeros_like(logical))
+
+    num_tokens_out, hidden = logical.shape
+    sf_rows = (num_tokens_out + _NUM_PER_TOKENS - 1) // _NUM_PER_TOKENS
+    if num_tokens_out == 0:
+        return (
+            torch.empty((0, hidden), dtype=torch.float8_e4m3fn, device=x.device),
+            torch.empty((0, hidden), dtype=torch.float32, device=x.device),
+        )
+    padded_rows = sf_rows * _NUM_PER_TOKENS - num_tokens_out
+    if padded_rows:
+        logical_for_reduce = torch.cat(
+            (
+                logical,
+                torch.zeros((padded_rows, hidden), dtype=torch.float32, device=x.device),
+            ),
+            dim=0,
+        )
+    else:
+        logical_for_reduce = logical
+    amax = (
+        logical_for_reduce.reshape(sf_rows, _NUM_PER_TOKENS, hidden)
+        .abs()
+        .amax(dim=1)
+        .clamp(min=1e-4)
+    )
+    fp8_max = torch.full_like(amax, _FP8_MAX)
+    out_sf = amax / fp8_max
+    if round_sf:
+        rounded_bits = (out_sf.view(torch.int32) + 0x007FFFFF) & 0x7F800000
+        out_sf = rounded_bits.view(torch.float32)
+        quant_sf = out_sf.reciprocal()
+    else:
+        quant_sf = fp8_max / amax
+    quant_sf_per_token = quant_sf.repeat_interleave(_NUM_PER_TOKENS, dim=0)[
+        :num_tokens_out
+    ]
+    out = torch.clamp(logical * quant_sf_per_token, -_FP8_MAX, _FP8_MAX).to(
+        torch.float8_e4m3fn
+    )
+    return out.contiguous(), out_sf.contiguous()
 
 
 def _make_fp8(shape: tuple[int, int]) -> torch.Tensor:
@@ -238,6 +305,10 @@ def test_per_channel_cast_fused_expand_empty_source_uses_padding() -> None:
             lambda: QuantPerChannelCastFusedRescaleOp(num_per_channels=64),
             "num_per_channels must be 128",
         ),
+        (
+            lambda: QuantPerChannelCastFusedOp(round_sf=1),
+            "round_sf must be bool",
+        ),
     ],
 )
 @pytest.mark.smoke
@@ -296,5 +367,54 @@ def test_per_channel_cast_fused_rescale_rejects_invalid_scale_tensor(
 ) -> None:
     x = _make_fp8((128, 256))
     x_sf_invs = torch.ones(sf_shape, device="cuda", dtype=sf_dtype)
+    with pytest.raises(ValueError, match=match):
+        QuantPerChannelCastFusedRescaleOp()(x, x_sf_invs)
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        pytest.param("alignment", "divisible by 16", marks=pytest.mark.smoke),
+        pytest.param("rank", "pos_to_token must be 1D", marks=pytest.mark.full),
+        pytest.param("dtype", "pos_to_token.dtype must be int32", marks=pytest.mark.full),
+    ],
+)
+def test_per_channel_cast_fused_expand_rejects_invalid_metadata(
+    case: str,
+    match: str,
+) -> None:
+    x = torch.randn((32, 128), device="cuda", dtype=torch.bfloat16)
+    if case == "alignment":
+        pos_to_token = torch.zeros((15,), device="cuda", dtype=torch.int32)
+    elif case == "rank":
+        pos_to_token = torch.zeros((4, 4), device="cuda", dtype=torch.int32)
+    else:
+        pos_to_token = torch.zeros((16,), device="cuda", dtype=torch.int64)
+
+    with pytest.raises(ValueError, match=match):
+        QuantPerChannelCastFusedExpandOp()(x, pos_to_token)
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        pytest.param("x-dtype", "x.dtype must be float8_e4m3fn", marks=pytest.mark.smoke),
+        pytest.param("hidden", "hidden must be positive and divisible by 256", marks=pytest.mark.full),
+        pytest.param("scale-device", "x_sf_invs must be a CUDA tensor", marks=pytest.mark.full),
+    ],
+)
+def test_per_channel_cast_fused_rescale_rejects_invalid_input_contract(
+    case: str,
+    match: str,
+) -> None:
+    if case == "x-dtype":
+        x = torch.ones((128, 256), device="cuda", dtype=torch.bfloat16)
+        x_sf_invs = torch.ones((128, 2), device="cuda", dtype=torch.float32)
+    elif case == "hidden":
+        x = _make_fp8((128, 128))
+        x_sf_invs = torch.ones((128, 1), device="cuda", dtype=torch.float32)
+    else:
+        x = _make_fp8((128, 256))
+        x_sf_invs = torch.ones((128, 2), dtype=torch.float32)
+
     with pytest.raises(ValueError, match=match):
         QuantPerChannelCastFusedRescaleOp()(x, x_sf_invs)

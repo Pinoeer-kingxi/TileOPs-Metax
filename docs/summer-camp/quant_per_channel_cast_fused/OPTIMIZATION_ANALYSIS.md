@@ -1,5 +1,11 @@
 # quant_per_channel_cast_fused 深度优化分析与开发计划
 
+> 2026-08-05 的测试入口合并、torch.compile性能基线和原始TileKernels调度回退以
+> [本轮重构记录](REFACTOR_LOG_2026-08-05.md)为准。本文既有性能表属于历史全路径
+> tile64适配baseline，不能与回退后的新基线混用。
+> 当前提交前版本已进一步收敛为40项production UT和20项Manifest Benchmark；
+> 本文103项/32项矩阵内容仅表示历史消融与覆盖探索。
+
 本文记录 `quant_per_channel_cast_fused` 当前 TileOPs 实现与两个外部实现的
 深度对比、MetaX C500 A/B Benchmark、正确性验证、mcProfiler、Roofline、
 失败实验以及后续分阶段开发计划。
@@ -135,13 +141,10 @@ Rescale/Rescale-Expand shared staging
 
 - Kernel：[`tileops/kernels/quant/per_channel_cast_fused.py`](../../../tileops/kernels/quant/per_channel_cast_fused.py)
 - Op：[`tileops/ops/quant/per_channel_cast_fused.py`](../../../tileops/ops/quant/per_channel_cast_fused.py)
-- 独立 reference：[`tileops/testing/per_channel_cast_fused.py`](../../../tileops/testing/per_channel_cast_fused.py)
-- 测试：[`tests/ops/test_per_channel_cast_fused.py`](../../../tests/ops/test_per_channel_cast_fused.py)
-- augenstern 70 项兼容矩阵：[`tests/ops/test_per_channel_cast_fused_augenstern.py`](../../../tests/ops/test_per_channel_cast_fused_augenstern.py)
+- 测试与独立PyTorch oracle：[`tests/ops/test_per_channel_cast_fused.py`](../../../tests/ops/test_per_channel_cast_fused.py)，合并后103项
 - 固定基线测试：[`tests/ops/test_per_channel_cast_fused_baselines.py`](../../../tests/ops/test_per_channel_cast_fused_baselines.py)
 - 固定 TileLang 基线：[`benchmarks/ops/per_channel_cast_fused_baselines.py`](../../../benchmarks/ops/per_channel_cast_fused_baselines.py)
-- Benchmark：[`benchmarks/ops/bench_per_channel_cast_fused.py`](../../../benchmarks/ops/bench_per_channel_cast_fused.py)
-- 32 项来源性能矩阵：[`benchmarks/ops/bench_per_channel_cast_fused_augenstern.py`](../../../benchmarks/ops/bench_per_channel_cast_fused_augenstern.py)
+- Benchmark：[`benchmarks/ops/bench_per_channel_cast_fused.py`](../../../benchmarks/ops/bench_per_channel_cast_fused.py)，统一承载9项稳定消融与32项规模矩阵
 - mcProfiler 驱动：[`benchmarks/ops/profile_per_channel_cast_fused.py`](../../../benchmarks/ops/profile_per_channel_cast_fused.py)
 - 一键复核脚本：[`scripts/run_quant_per_channel_cast_fused.sh`](../../../scripts/run_quant_per_channel_cast_fused.sh)
 - 原始实测文本：[`docs/summer-camp/quant_per_channel_cast_fused/artifacts/`](artifacts/)
