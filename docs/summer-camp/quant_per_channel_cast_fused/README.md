@@ -10,7 +10,7 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 > 2026-08-05：测试入口合并、三类性能基线与原始TileKernels调度回退见
 > [本轮重构记录](REFACTOR_LOG_2026-08-05.md)。下文旧性能表使用的是历史全路径
 > `tile_k=64`适配baseline，不代表本轮恢复到BF16=128、Rescale=256后的新结果。
-> 当前提交前收敛状态为：40项production功能测试、20项正式Manifest Benchmark
+> 当前状态为：40项production数值/契约测试加5项Rescale静态分派测试、20项正式Manifest Benchmark
 > workload（四个变体各5项），以及位于`benchmarks/tests/`的7项TileKernels
 > baseline可信度测试。下文涉及103项/32项矩阵的章节仅保留为历史迭代证据。
 >
@@ -92,7 +92,7 @@ TileOPs-Metax/
 | `tileops/manifest/quantization.yaml` | 定义四个算子的输入输出、参数、shape 规则、workload 和 Roofline 公式 |
 | `tileops/ops/quant/per_channel_cast_fused.py` | 对外 Op 接口；负责参数、dtype、shape、CUDA、连续性和索引检查，以及 Kernel 缓存和调度 |
 | `tileops/kernels/quant/per_channel_cast_fused.py` | 真正执行设备计算的 TileLang Kernel |
-| `tests/ops/test_per_channel_cast_fused.py` | 单一 production 正确性入口：40项路径、dtype、数值边界与异常测试；包含独立 PyTorch oracle |
+| `tests/ops/test_per_channel_cast_fused.py` | 单一 production 正确性入口：40项路径、dtype、数值边界与异常测试，加5项Rescale静态分派测试；包含独立 PyTorch oracle |
 | `benchmarks/tests/test_per_channel_cast_fused_baseline.py` | 固定 TileKernels TileLang 基线的来源、调度参数与 eager PyTorch 一致性测试 |
 | `workloads/per_channel_cast_fused.py` | Benchmark 输入生成 |
 | `benchmarks/ops/per_channel_cast_fused_baselines.py` | 固定官方 `dev@0266ab7` TileLang 基线；BF16保留tile128、Rescale保留tile256，仅FP32因C500 shared限制改为tile64 |
@@ -189,7 +189,7 @@ Kernel 固定使用：
 - `tile_m = 128`；
 - `threads = 256`；
 - MetaX wavefront 大小为 64；
-- 每个 token 方向线程组使用 64 个线程。
+- Plain/Expand每个token使用64个线程；Rescale/RescaleExpand按输出token数静态选择8/16/32个线程，对应FP8 vec8/vec4/vec2。
 
 所有路径在 MetaX C500 上统一固定：
 
@@ -201,7 +201,7 @@ Kernel 固定使用：
 
 Plain 和 Expand 默认 `register_staging=True`。每线程的 32 个输入值在第一次
 amax 遍历与第二次量化遍历之间保存在 `T.alloc_local` 数组，不再写入并读回
-输入 shared tile；四条路径仍保留 1,024 B 的 `amax_shared[1, 256]` 归约
+输入 shared tile；四条路径仍保留 `amax_shared` 归约
 scratch。`T.alloc_local` 表示线程私有存储，不能仅凭源码断言全部落入物理
 寄存器；是否发生 private-memory spill 以 mcProfiler 指标为准。
 
@@ -390,7 +390,8 @@ PyTorch实现，避免测试oracle与性能基线共享实现
 
 ### 6.2 测试覆盖
 
-production功能测试收敛为单文件40项。规模变化本身不重复堆叠用例，测试预算
+production功能测试收敛为单文件45项，其中40项验证数值与接口契约，5项验证
+Rescale动态线程映射的256/257、Expand 2048和非Expand 2048/4096边界。规模变化本身不重复堆叠用例，测试预算
 优先覆盖新代码路径、数值语义、资源策略和失败契约：
 
 - BF16 和 FP32 plain 输入；
@@ -973,8 +974,9 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 
 - augenstern 的 Rescale register staging 回退约 24%～33%，本地保留 shared。
 - 单 lane scale shuffle 在本地独立 A/B 回退 9.74%～21.27%，不采用。
-- ACoolFIsh 的 Rescale `threads_per_token=16/vec_k=4` 同时混入多项调度改动，
-  尚不能单独归因，未吸收。
+- Rescale动态向量化已在当前Kernel上完成隔离消融并吸收：小规模使用
+  `threads_per_token=8/vec_k=8`，中等规模使用`16/4`，大规模使用`32/2`。
+  受影响的10项正式workload全部胜出，几何平均加速`1.2169x`。
 - ACoolFIsh 的 `shared_rows=120`、Op-side CUDA `F.pad`、动态 tile 分派、
   custom-op/fake/meta 和 `torch.compile` 都未采用。
 
@@ -989,8 +991,8 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 - Rescale/Rescale-Expand 的 register staging 已明确禁用；其输入 scale 与
   输入值同时跨归约存活会增加 local/private 压力，现阶段 shared 更稳定。
 - 旧的标量 lane-0 scale shuffle 广播已经独立 A/B，虽然正确，但稳定回退
-  9.74%～21.27%，因此不采用。ACoolFIsh 最新 vec4 映射与 subgroup shuffle
-  并不等价于该失败实验，需要在当前 Kernel 上做隔离 A/B 后才能吸收。
+  9.74%～21.27%，因此不采用。该失败实验与当前已吸收的动态vec8/vec4/vec2
+  访存映射不同；后者保留`amax_shared`，并已完成隔离A/B。
 - plain 非 gather 路径是连续访存，可评估独立 `T.copy` 快速路径；任何
   改动都需要重新执行正确性、Benchmark 和 mcProfiler A/B。
 - 必须保留正 `pos_to_token` 越界拒绝、负索引 padding 语义和 Kernel 尾块
@@ -1022,7 +1024,7 @@ export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 ./scripts/run_quant_per_channel_cast_fused.sh profile rescale-control production
 ```
 
-`smoke`快速检查production套件的smoke用例；`correctness`执行单文件40项
+`smoke`快速检查production套件的smoke用例；`correctness`执行单文件45项
 production功能测试；`baselines`
 验证固定provenance常量和数值门禁；`benchmark`运行Manifest驱动的20项四方报告；`gates`
 统一运行 diff、Manifest、Benchmark 基础测试、Ops Manifest 和 Ruff 检查。
@@ -1039,7 +1041,7 @@ production功能测试；`baselines`
 | plain/expand/rescale/rescale-expand | 完成 |
 | C500 全路径 `tile_k=64` | 完成；含 shared-memory 门禁 |
 | 混合 thread-local/shared staging | 完成；Plain/Expand local，Rescale shared |
-| 正确性、边界、异常测试 | 单一production入口40项，C500全部通过 |
+| 正确性、边界、异常测试 | 单一production入口45项，C500全部通过 |
 | 固定基线测试 | 7 项通过 |
 | eager PyTorch 基线 | 完成并固定上游 SHA |
 | 官方式 TileLang 基线 | 完成；`dev@0266ab7`原调度，只有C500无法容纳的FP32路径改为`tile_k=64` |

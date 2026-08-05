@@ -22,6 +22,9 @@ _NUM_PER_TOKENS = 128
 _NUM_PER_CHANNELS = 128
 _NUM_THREADS = 256
 _NUM_THREADS_PER_TOKEN = 64
+_SMALL_RESCALE_THREADS_PER_TOKEN = 8
+_DEFAULT_RESCALE_THREADS_PER_TOKEN = 16
+_LARGE_RESCALE_THREADS_PER_TOKEN = 32
 _TILE_K = 64
 _C500_SHARED_MEMORY_LIMIT_BYTES = 64 * 1024
 _FP8_MAX = 448.0
@@ -33,16 +36,27 @@ def _shared_memory_bytes(
     in_dtype: torch.dtype,
     *,
     register_staging: bool = False,
+    threads_per_token: int = _NUM_THREADS_PER_TOKEN,
 ) -> int:
     """Return explicit staging and reduction shared memory per workgroup."""
-    if tile_k <= 0 or tile_k % _NUM_THREADS_PER_TOKEN != 0:
+    if tile_k <= 0 or threads_per_token <= 0 or tile_k % threads_per_token != 0:
         raise ValueError(
-            f"tile_k must be a positive multiple of {_NUM_THREADS_PER_TOKEN}, got {tile_k}"
+            "tile_k must be positive and divisible by threads_per_token, got "
+            f"tile_k={tile_k}, threads_per_token={threads_per_token}"
         )
     element_bytes = torch.empty((), dtype=in_dtype).element_size()
     staging_bytes = 0 if register_staging else _NUM_PER_TOKENS * tile_k * element_bytes
-    reduction_bytes = (tile_k // _NUM_THREADS_PER_TOKEN) * _NUM_THREADS * 4
+    reduction_bytes = (tile_k // threads_per_token) * _NUM_THREADS * 4
     return staging_bytes + reduction_bytes
+
+
+def _rescale_threads_per_token(num_tokens_out: int, with_expand: bool) -> int:
+    """Choose a C500 FP8 vector width from the static output-token count."""
+    if num_tokens_out <= 256:
+        return _SMALL_RESCALE_THREADS_PER_TOKEN
+    if num_tokens_out >= 4096 or (with_expand and num_tokens_out >= 2048):
+        return _LARGE_RESCALE_THREADS_PER_TOKEN
+    return _DEFAULT_RESCALE_THREADS_PER_TOKEN
 
 
 @tilelang.jit(
@@ -62,14 +76,19 @@ def _per_channel_cast_fused_kernel(
     register_staging: bool,
 ):
     tile_m = _NUM_PER_TOKENS
+    threads_per_token = _NUM_THREADS_PER_TOKEN
+    if with_rescale:
+        # Rescale consumes FP8 input. Fewer lanes per token turn the existing
+        # vectorized loops into real vec8/vec4/vec2 global/shared accesses.
+        threads_per_token = _rescale_threads_per_token(num_tokens_out, with_expand)
     # Keep the hidden tile at one C500 wave. In particular, a 128x128 FP32
     # staging tile plus reduction scratch needs about 66 KiB of shared memory,
     # exceeding the C500's 64 KiB limit. A fixed tile of 64 is safe for every
     # supported path and also exposes more workgroups than the upstream
     # 128/256-column configurations.
     tile_k = _TILE_K
-    vec_k = tile_k // _NUM_THREADS_PER_TOKEN
-    vec_m = tile_m * _NUM_THREADS_PER_TOKEN // _NUM_THREADS
+    vec_k = tile_k // threads_per_token
+    vec_m = tile_m * threads_per_token // _NUM_THREADS
     sf_cols = hidden // _NUM_PER_CHANNELS if with_rescale else 1
     pos_size = num_tokens_out if with_expand else 1
 
@@ -112,8 +131,9 @@ def _per_channel_cast_fused_kernel(
             out_local = T.alloc_local((vec_k,), T.float8_e4m3fn)
 
             tid = T.get_thread_binding(0)
-            m_id = tid // _NUM_THREADS_PER_TOKEN
-            k_id = tid % _NUM_THREADS_PER_TOKEN
+            m_id = tid // threads_per_token
+            k_id = tid % threads_per_token
+            subgroup_lane = tid % 64 // threads_per_token * threads_per_token
             m_offset = pid_token * tile_m + m_id * vec_m
             k_offset = pid_hidden * tile_k + k_id * vec_k
             source_token = T.alloc_var(T.int32)
@@ -127,7 +147,7 @@ def _per_channel_cast_fused_kernel(
                     if pos_idx < num_tokens_out:
                         tmp = pos_to_token[pos_idx]
                 for i in T.serial(vec_m):
-                    pos_to_token_local[i] = T.shfl_sync(tmp, i)
+                    pos_to_token_local[i] = T.shfl_sync(tmp, subgroup_lane + i)
 
             if with_rescale:
                 for i in T.serial(vec_m):
@@ -175,12 +195,12 @@ def _per_channel_cast_fused_kernel(
             sf_inv = T.alloc_var(T.float32)
             sf = 0.0
             sf_inv = 0.0
-            col_id = tid % _NUM_THREADS_PER_TOKEN * vec_k + tid // _NUM_THREADS_PER_TOKEN
+            col_id = tid % threads_per_token * vec_k + tid // threads_per_token
             if tid < tile_k:
                 for i in T.serial(
                     col_id // vec_k,
                     _NUM_THREADS,
-                    _NUM_THREADS_PER_TOKEN,
+                    threads_per_token,
                 ):
                     sf = T.max(sf, amax_shared[col_id % vec_k, i])
                 sf, sf_inv = _scale_and_inverse(sf)
@@ -188,7 +208,7 @@ def _per_channel_cast_fused_kernel(
                 amax_shared[0, tid] = sf_inv
 
             for i in T.serial(vec_k):
-                amax_local[i] = amax_shared[0, k_id + i * _NUM_THREADS_PER_TOKEN]
+                amax_local[i] = amax_shared[0, k_id + i * threads_per_token]
 
             for i in T.serial(vec_m):
                 out_token = m_offset + i
@@ -237,12 +257,18 @@ class PerChannelCastFusedKernel(Kernel):
         self.round_sf = round_sf
         self.device = device
         self.tile_k = _TILE_K
+        self.threads_per_token = (
+            _rescale_threads_per_token(num_tokens_out, with_expand)
+            if with_rescale
+            else _NUM_THREADS_PER_TOKEN
+        )
         self.init_config(config, tune)
         self.register_staging = self.config["register_staging"]
         self.shared_memory_bytes = _shared_memory_bytes(
             self.tile_k,
             self.dtype,
             register_staging=self.register_staging,
+            threads_per_token=self.threads_per_token,
         )
         if self.shared_memory_bytes > _C500_SHARED_MEMORY_LIMIT_BYTES:
             raise ValueError(

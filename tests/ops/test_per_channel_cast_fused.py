@@ -7,6 +7,7 @@ import torch
 
 from tileops.kernels.quant.per_channel_cast_fused import (
     _C500_SHARED_MEMORY_LIMIT_BYTES,
+    _rescale_threads_per_token,
     _shared_memory_bytes,
 )
 from tileops.ops import (
@@ -125,9 +126,29 @@ def test_per_channel_cast_fused_c500_shared_memory_budget() -> None:
     assert _shared_memory_bytes(128, torch.float32) == 67_584
     assert _shared_memory_bytes(128, torch.bfloat16) == 34_816
     assert _shared_memory_bytes(64, torch.float8_e4m3fn) == 9_216
+    assert _shared_memory_bytes(
+        64, torch.float8_e4m3fn, threads_per_token=16
+    ) == 12_288
     assert _shared_memory_bytes(256, torch.float8_e4m3fn) == 36_864
     assert _shared_memory_bytes(128, torch.float32) > _C500_SHARED_MEMORY_LIMIT_BYTES
     assert _shared_memory_bytes(64, torch.float32) <= _C500_SHARED_MEMORY_LIMIT_BYTES
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "num_tokens_out, with_expand, expected",
+    [
+        (256, False, 8),
+        (257, False, 16),
+        (2048, False, 16),
+        (2048, True, 32),
+        (4096, False, 32),
+    ],
+)
+def test_per_channel_cast_fused_rescale_thread_mapping(
+    num_tokens_out: int, with_expand: bool, expected: int
+) -> None:
+    assert _rescale_threads_per_token(num_tokens_out, with_expand) == expected
 
 
 @pytest.mark.parametrize(
