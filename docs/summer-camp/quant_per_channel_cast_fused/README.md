@@ -12,13 +12,14 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | 项目 | 内容 |
 |---|---|
 | 算子 | `quant_per_channel_cast_fused` |
-| TileOPs 分支 | `feat/quant-per-channel-cast-fused` |
+| TileOPs 分支 | `main` |
 | TileOPs 迁移基线 | `70c85c45bd476ee53134afcd36d90a19fbf409c5` |
 | 原迁移实现提交 | `967b65b7775f9523b884bacf410bb66032c505f0` |
 | `tile_k=64` 与固定基线提交 | `253fe14e7c33e5c9851e6120d46caf78cbe3d13b` |
 | Plain/Expand thread-local staging 提交 | `6ec6bde` |
 | 测试与 profile 入口提交 | `3a0f2c0` |
 | augenstern 70 项矩阵提交 | `266fabb` |
+| augenstern 32 项性能矩阵适配提交 | `d85cb35` |
 | 精确 profiler metrics runner 提交 | `ec3f87d` |
 | Rescale shared 预算门禁提交 | `c9655a2` |
 | mcProfiler 实测代码基线 | `ec3f87d6b357f9d97ab80cc49ee783ed4b4db742` |
@@ -34,8 +35,11 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 | ACoolFIsh 最新可访问审查版本 | `497e7237546c5df4ec8056b0e423151bffbfad0c` |
 | augenstern register-resident 审查版本 | `387119e154c6cfa4d09b25823635814380af91f9` |
 | augenstern 测试最后提交 / blob | `c77cc75caa4b8a281a814b66b06102564ef33a01` / `11238539f3f64e2b5585a7a906067eab9d7e1e7c` |
+| augenstern 性能矩阵提交 | `2d65be6` |
+| augenstern Benchmark / Manifest blob | `189ac950959893619b77fa4fbe783f8b98cd33f1` / `7d0611e60d7e37a699d2db14415e7601a80ae745` |
 | Manifest PR | https://gitlink.org.cn/ccf-ai-infra/TileOPs-Metax/pulls/29 |
 | 实测日期 | 2026-08-04 |
+| 32 项性能矩阵实测日期 | 2026-08-05 |
 | 实测设备 | MetaX C500，25% sGPU 切片 |
 
 迁移结果包含四个公开算子：
@@ -67,6 +71,7 @@ TileOPs-Metax/
 ├── workloads/per_channel_cast_fused.py
 ├── benchmarks/ops/per_channel_cast_fused_baselines.py
 ├── benchmarks/ops/bench_per_channel_cast_fused.py
+├── benchmarks/ops/bench_per_channel_cast_fused_augenstern.py
 ├── benchmarks/ops/profile_per_channel_cast_fused.py
 └── scripts/run_quant_per_channel_cast_fused.sh
 ```
@@ -85,9 +90,10 @@ TileOPs-Metax/
 | `workloads/per_channel_cast_fused.py` | Benchmark 输入生成 |
 | `benchmarks/ops/per_channel_cast_fused_baselines.py` | 固定官方 `dev` 算法结构和语义的 benchmark-only 上游式 TileLang 基线；显式适配当前 Benchmark 接口，并在 C500 上使用 `tile_k=64` |
 | `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的生产 Kernel、shared-staging 对照、固定 TileLang 与 eager PyTorch 四方 Benchmark |
+| `benchmarks/ops/bench_per_channel_cast_fused_augenstern.py` | 适配当前 `Quant*` Op 的 augenstern 32 项来源性能矩阵；计时前严格校验正确性，比较 production 与 eager PyTorch |
 | `benchmarks/ops/profile_per_channel_cast_fused.py` | mcProfiler 稳定驱动；固定输入构造、workgroup 期望值、commit、dirty 状态和 Kernel SHA256 |
-| `scripts/run_quant_per_channel_cast_fused.sh` | smoke、完整正确性、固定基线、Benchmark、质量门禁和 mcProfiler 的统一入口 |
-| `docs/summer-camp/quant_per_channel_cast_fused/artifacts/` | 三轮 Benchmark、最终回归和五份目标 Kernel profiler 原始文本 |
+| `scripts/run_quant_per_channel_cast_fused.sh` | smoke、完整正确性、固定基线、9 项四方 Benchmark、32 项性能矩阵、质量门禁和 mcProfiler 的统一入口 |
+| `docs/summer-camp/quant_per_channel_cast_fused/artifacts/` | 三轮四方 Benchmark、32 项性能矩阵、最终回归和五份目标 Kernel profiler 原始文本 |
 | `tileops/ops/__init__.py` | 导出四个公开 Op |
 
 调用链为：
@@ -480,6 +486,10 @@ python -m pytest -q tests/test_ops_manifest.py
 | Benchmark 基础测试 | `17 passed in 24.36s` |
 | Ops Manifest 测试 | `7 passed in 23.44s` |
 | 最终四方 Benchmark 回归 | `9 passed in 32.64s` |
+| 32 项 suite 接入后的四方回归 | `9 passed in 32.94s`；仍只执行原 9 项 |
+| 32 项来源性能矩阵收集 | `32 tests collected`；原四方入口仍为 `9 tests` |
+| 32 项性能 smoke | `4 passed, 28 deselected in 35.52s` |
+| 32 项完整 C500 Benchmark | `32 passed in 117.11s` |
 | Ruff check | `All checks passed!` |
 | Ruff format | 通过 |
 | `py_compile` | 通过 |
@@ -603,6 +613,105 @@ SHA256 为 `9566cdc0f60a86153d296efe5975649eb8bba40f505803434bd857e696fff3dc`。
   单变量报告，因此不把该候选带入生产路径。
 - 固定 TileLang 仍是独立的上游算法基线；shared-staging 则是用于归因
   thread-local staging 收益的单变量对照，两者用途不同。
+
+### 7.4 augenstern 32 项来源性能矩阵
+
+远端 `exp/quant-per-channel-register-resident@387119e` 的性能提交为
+`2d65be6`。它的函数名、Op 名和源码路径与当前仓库不同，因此本仓没有直接
+复制远端 Benchmark：
+
+| 来源分支 | 当前仓库适配 |
+|---|---|
+| `PerChannelCastFusedOp` | `QuantPerChannelCastFusedOp` |
+| `PerChannelCastFusedExpandOp` | `QuantPerChannelCastFusedExpandOp` |
+| `PerChannelCastFusedRescaleOp` | `QuantPerChannelCastFusedRescaleOp` |
+| `PerChannelCastFusedRescaleExpandOp` | `QuantPerChannelCastFusedRescaleExpandOp` |
+| `x_sf` | `x_sf_invs`，显式 FP32 输入 |
+| `tileops/kernels/per_channel_cast_fused_maca.py` | `tileops/kernels/quant/per_channel_cast_fused.py` |
+| 远端 `PerChannelCastFusedWorkload` | 当前 workload 子类，保持当前 Op 的输入顺序和 shape contract |
+
+32 项配置已经加入当前 `tileops/manifest/quantization.yaml`，用
+`__suite: augenstern-performance` 标识；原有 9 项稳定四方 A/B 不受影响。
+矩阵分布为四种变体各 8 项：
+
+| 变体 | 输入 shape / 输出 token | dtype 与特性 |
+|---|---|---|
+| Plain | `128x128`, `256x512`, `512x512`, `1024x3072`, `2048x1024`, `4096x7168`, `4096x3072`, `8192x7168` | BF16/FP32，`round_sf` 两种取值 |
+| Expand | `17x128->32`, `137x512->144`, `513x512->1024`, `513x3072->4096`, `1001x3072->2048`, `4001x7168->8192`, `4001x3072->8192`, `4097x7168->8192` | BF16/FP32，随机 position，`pos[::17] = -1` |
+| Rescale | `128x256`, `256x512`, `512x512`, `1024x3072`, `2048x1024`, `4096x7168`, `4096x3072`, `8192x7168` | FP8 e4m3 + FP32 `x_sf_invs`，`round_sf` 两种取值 |
+| RescaleExpand | `17x256->32`, `137x512->144`, `513x512->1024`, `513x3072->4096`, `1001x3072->2048`, `4001x7168->8192`, `4001x3072->8192`, `4097x7168->8192` | FP8 e4m3 + scale + 随机 position |
+
+输入生成与远端语义一致，但调用当前接口：Plain 使用指定 dtype 的
+`torch.randn`；Rescale 生成 `real` 与 `x_sf_invs = random * 0.02 + 1e-4`，
+再计算 `clamp(real / repeat_interleave(x_sf_invs), -448, 448).to(FP8)`；
+Expand 使用 `torch.randint(0, num_tokens)`，每 17 个位置写入 `-1`。每个
+case 计时前先使用仓内独立 `per_channel_cast_fused_reference` 严格检查
+FP8 输出和 scale，OOM、错误和 mismatch 都不会静默跳过。本入口不使用
+`torch.compile`，只比较当前 production Op 和 eager PyTorch reference；
+固定 TileLang/shared-staging 的长期 A/B 仍由 9 项入口负责。
+
+运行命令：
+
+```bash
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix --collect-only -q
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix -m smoke
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix
+```
+
+收集结果为 `32 tests`，smoke 为四种变体各 1 项，完整实测在 MetaX C500
+上为 `32 passed in 117.11s`。默认协议仍为 10 次 warmup、50 次重复、3
+个 trial、L2 flush、输入 clone 和 CUPTI kernel-only 时间。完整原始报告为
+[benchmark_augenstern_matrix.txt](artifacts/benchmark_augenstern_matrix.txt)，
+SHA256 为
+`0ec62a2288e7bfa890b2b022447962c0d3437d69810636c35b52b15430ee7405`。
+
+报告中的 production/eager 延迟如下，单位为 ms；加速比定义为
+`eager / production`：
+
+| 变体 | workload | production | eager | 加速 |
+|---|---|---:|---:|---:|
+| Plain | `tiny-boundary-bf16` (128x128) | 0.0315 | 0.0623 | 1.978x |
+| Plain | `small-rounded-bf16` (256x512) | 0.0313 | 0.0796 | 2.543x |
+| Plain | `small-bf16` (512x512) | 0.0311 | 0.0719 | 2.312x |
+| Plain | `medium-fp32` (1024x3072) | 0.0475 | 0.1843 | 3.880x |
+| Plain | `mid-token-fp32` (2048x1024) | 0.0416 | 0.1384 | 3.327x |
+| Plain | `deepseek-v3-bf16` (4096x7168) | 0.2501 | 1.4545 | 5.816x |
+| Plain | `qwen3-rounded-fp32` (4096x3072) | 0.1201 | 0.5981 | 4.980x |
+| Plain | `large-token-rounded-bf16` (8192x7168) | 0.4728 | 2.8532 | 6.035x |
+| Expand | `tiny-expand-bf16` (17x128->32) | 0.0290 | 0.0976 | 3.366x |
+| Expand | `near-one-expand-rounded-bf16` (137x512->144) | 0.0317 | 0.1268 | 4.000x |
+| Expand | `small-expand-bf16` (513x512->1024) | 0.0302 | 0.1328 | 4.397x |
+| Expand | `high-ratio-expand-fp32` (513x3072->4096) | 0.1107 | 0.9297 | 8.398x |
+| Expand | `medium-expand-fp32` (1001x3072->2048) | 0.0680 | 0.5051 | 7.428x |
+| Expand | `moe-expand-bf16` (4001x7168->8192) | 0.4753 | 4.2261 | 8.891x |
+| Expand | `moe-expand-rounded-fp32` (4001x3072->8192) | 0.2135 | 1.7836 | 8.354x |
+| Expand | `large-tail-expand-rounded-bf16` (4097x7168->8192) | 0.4734 | 4.2347 | 8.945x |
+| Rescale | `tiny-rescale` (128x256) | 0.0541 | 0.0757 | 1.399x |
+| Rescale | `small-boundary-rescale-rounded` (256x512) | 0.0519 | 0.0843 | 1.624x |
+| Rescale | `small-rescale` (512x512) | 0.0520 | 0.0778 | 1.496x |
+| Rescale | `medium-rescale-rounded` (1024x3072) | 0.0678 | 0.2988 | 4.407x |
+| Rescale | `mid-token-rescale` (2048x1024) | 0.0592 | 0.2099 | 3.546x |
+| Rescale | `deepseek-v3-rescale` (4096x7168) | 0.4520 | 2.2056 | 4.880x |
+| Rescale | `qwen3-rescale-rounded` (4096x3072) | 0.1996 | 0.9854 | 4.937x |
+| Rescale | `large-token-rescale-rounded` (8192x7168) | 0.8775 | 4.3503 | 4.958x |
+| RescaleExpand | `tiny-expand-rescale` (17x256->32) | 0.0530 | 0.1159 | 2.187x |
+| RescaleExpand | `near-one-expand-rescale-rounded` (137x512->144) | 0.0514 | 0.1325 | 2.578x |
+| RescaleExpand | `small-expand-rescale` (513x512->1024) | 0.0518 | 0.1343 | 2.593x |
+| RescaleExpand | `high-ratio-expand-rescale` (513x3072->4096) | 0.2159 | 0.9834 | 4.555x |
+| RescaleExpand | `medium-expand-rescale-rounded` (1001x3072->2048) | 0.1351 | 0.6105 | 4.519x |
+| RescaleExpand | `moe-expand-rescale` (4001x7168->8192) | 0.8624 | 4.9585 | 5.750x |
+| RescaleExpand | `moe-expand-rescale-rounded` (4001x3072->8192) | 0.3827 | 2.1517 | 5.622x |
+| RescaleExpand | `large-tail-expand-rescale-rounded` (4097x7168->8192) | 0.8608 | 4.9861 | 5.792x |
+
+32 项全部 production 胜过 eager PyTorch。按 case 算术平均加速比为：Plain
+`3.859x`、Expand `6.723x`、Rescale `3.406x`、RescaleExpand `4.199x`，
+总体 `4.547x`；最小为 `tiny-rescale` 的 `1.399x`，最大为
+`large-tail-expand-rounded-bf16` 的 `8.945x`。production 的 Manifest
+Roofline 最高达到 `0.3745 TFLOP/s`（Plain 8192x7168 BF16），最高语义带宽
+为 `0.5932 TB/s`（Expand 4001x3072->8192 FP32）；这些是语义 FLOPs/bytes
+除以延迟，不能替代 mcProfiler 的物理 HBM transaction。32 项矩阵本身未再
+为每个 case 单独运行 mcProfiler；第 8 节的 5 份 per-kernel 报告继续作为
+硬件指令、shared/private 访问和物理 Roofline 的证据。
 
 ## 8. mcProfiler 实测
 
@@ -810,6 +919,21 @@ HBM 峰值”组合成效率指标；它本身不能校准或证明切片的物�
   Rescale 路径因额外 scale 读取、二次乘法和 shared staging，仍是后续
   独立优化重点。
 
+### 9.4 32 项矩阵的 Roofline 补充
+
+32 项生产结果沿用相同的 Op-local Roofline 公式，因此没有为每个 case 重新
+定义 FLOPs 或字节数。Plain/Expand 的算法语义 AI 约为 BF16 的 `0.995`
+FLOP/B、FP32 的 `0.599` FLOP/B；Rescale/RescaleExpand 约为 `2.431`
+FLOP/B。完整矩阵 production 的语义带宽范围为约 `0.0003～0.5932 TB/s`，
+最高值来自 `moe-expand-rounded-fp32`。按整卡 1,843.2 GB/s 归一化为约
+32.18%，按未校准的 25% 线性参考 460.8 GB/s 为约 128.73%；后一个数不表示
+物理带宽超过峰值，因为 Expand 的逻辑 gather 读取可以被缓存复用。
+
+因此本矩阵的可靠结论是：大 shape 上当前 production 明显优于 eager PyTorch，
+Plain/Expand 的低算术强度使片上 staging 和访存路径更关键；但 32 项语义
+Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，也不能
+把语义带宽百分比当作 C500 分片实测效率。
+
 ## 10. 本次迁移中的适配与修复
 
 1. 将上游 QuantTensor tuple 拆成 Manifest 可描述的 `x` 和
@@ -836,6 +960,11 @@ HBM 峰值”组合成效率指标；它本身不能校准或证明切片的物�
     Kernel 独立 A/B 的优化，不整体替换现有接口、校验和测试结构。
 15. 将 augenstern `ff86cdf` / `ea5d33e` / `c77cc75` 的完整 70 项
     功能/正确性矩阵迁移为独立兼容套件，并保留本地更严格的比较与失败语义。
+16. 将 augenstern `2d65be6` 的 32 项性能 shape/dtype/round 矩阵加入当前
+    Manifest；通过 `__suite` 与长期 9 项四方 A/B 隔离，并适配当前四个
+    `QuantPerChannelCastFused*Op` 的 `x_sf_invs`、Kernel cache 和 Roofline。
+17. 在 C500 完成 32 项 production/eager 实测，归档原始报告和 SHA256；该
+    性能矩阵不使用 `torch.compile`，也不把来源旧算子路径冒充当前 Kernel。
 
 ### 10.1 真正吸收的 Kernel 优化
 
@@ -899,6 +1028,9 @@ export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 ./scripts/run_quant_per_channel_cast_fused.sh correctness
 ./scripts/run_quant_per_channel_cast_fused.sh baselines
 ./scripts/run_quant_per_channel_cast_fused.sh benchmark
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix --collect-only -q
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix -m smoke
+./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix
 ./scripts/run_quant_per_channel_cast_fused.sh gates
 
 ./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium production
@@ -913,6 +1045,8 @@ augenstern 70 项兼容矩阵；`correctness` 执行本地 33 项与矩阵 70 �
 共 103 个 pytest 节点；`baselines`
 验证固定 provenance 常量和数值门禁；`benchmark` 运行四方 9-workload 报告；`gates`
 统一运行 diff、Manifest、Benchmark 基础测试、Ops Manifest 和 Ruff 检查。
+`benchmark-matrix` 只运行当前 Op 适配的 32 项来源性能矩阵，避免把长期 9 项
+四方报告和来源覆盖矩阵混为一套统计。
 `profile` 由脚本调用 mcProfiler，并用稳定 driver 隔离目标 Kernel。
 
 ## 13. 完成状态
@@ -930,7 +1064,9 @@ augenstern 70 项兼容矩阵；`correctness` 执行本地 33 项与矩阵 70 �
 | 固定基线测试 | 7 项通过 |
 | eager PyTorch 基线 | 完成并固定上游 SHA |
 | 官方式 TileLang 基线 | 完成；`dev@0266ab7` + C500 `tile_k=64` |
-| Benchmark | 9 组四方 workload、3 次完整独立报告实测完成 |
+| Benchmark | 9 组四方 workload、3 次完整独立报告实测完成；来源 32 项矩阵 `32 passed` |
+| 32 项性能矩阵 | Plain/Expand/Rescale/RescaleExpand 各 8 项，C500 实测 `32 passed in 117.11s` |
+| 32 项原始报告 | [benchmark_augenstern_matrix.txt](artifacts/benchmark_augenstern_matrix.txt)，SHA256 `0ec62a2288e7bfa890b2b022447962c0d3437d69810636c35b52b15430ee7405` |
 | profile driver/runner | 完成；支持 production/shared 单变量采样 |
 | mcProfiler | Plain/Expand 同协议 A/B 与 Rescale 控制组共 5 份精确报告完成 |
 | Roofline | 9 组语义 Roofline、整卡保守参考与未校准 25% 线性参考完成 |

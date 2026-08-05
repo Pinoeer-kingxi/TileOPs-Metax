@@ -1,0 +1,121 @@
+# TileOPs Benchmark Report
+Generated: 2026-08-05 02:20:00
+
+## Environment
+
+- **Torch version**: 2.8.0+metax3.7.1.3
+- **CUDA version (torch)**: 11.6
+- **GPU model**: MetaX C500
+- **Driver version**: N/A
+
+## QuantPerChannelCastFusedOp
+
+### tileops
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs | config |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| plain | tiny-boundary-bf16 | (128, 128) | torch.bfloat16 | 128 | False | 0.0315 | 0.0016 | 0.0016 | {'register_staging': True} |
+| plain | small-rounded-bf16 | (256, 512) | torch.bfloat16 | 256 | True | 0.0313 | 0.0126 | 0.0127 | {'register_staging': True} |
+| plain | small-bf16 | (512, 512) | torch.bfloat16 | 512 | False | 0.0311 | 0.0254 | 0.0255 | {'register_staging': True} |
+| plain | medium-fp32 | (1024, 3072) | torch.float32 | 1024 | False | 0.0475 | 0.1995 | 0.3329 | {'register_staging': True} |
+| plain | mid-token-fp32 | (2048, 1024) | torch.float32 | 2048 | False | 0.0416 | 0.1520 | 0.2536 | {'register_staging': True} |
+| plain | deepseek-v3-bf16 | (4096, 7168) | torch.bfloat16 | 4096 | False | 0.2501 | 0.3541 | 0.3559 | {'register_staging': True} |
+| plain | qwen3-rounded-fp32 | (4096, 3072) | torch.float32 | 4096 | True | 0.1201 | 0.3160 | 0.5272 | {'register_staging': True} |
+| plain | large-token-rounded-bf16 | (8192, 7168) | torch.bfloat16 | 8192 | True | 0.4728 | 0.3745 | 0.3764 | {'register_staging': True} |
+
+### torch-eager
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| plain | tiny-boundary-bf16 | (128, 128) | torch.bfloat16 | 128 | False | 0.0623 | 0.0008 | 0.0008 |
+| plain | small-rounded-bf16 | (256, 512) | torch.bfloat16 | 256 | True | 0.0796 | 0.0050 | 0.0050 |
+| plain | small-bf16 | (512, 512) | torch.bfloat16 | 512 | False | 0.0719 | 0.0110 | 0.0110 |
+| plain | medium-fp32 | (1024, 3072) | torch.float32 | 1024 | False | 0.1843 | 0.0515 | 0.0859 |
+| plain | mid-token-fp32 | (2048, 1024) | torch.float32 | 2048 | False | 0.1384 | 0.0457 | 0.0762 |
+| plain | deepseek-v3-bf16 | (4096, 7168) | torch.bfloat16 | 4096 | False | 1.4545 | 0.0609 | 0.0612 |
+| plain | qwen3-rounded-fp32 | (4096, 3072) | torch.float32 | 4096 | True | 0.5981 | 0.0634 | 0.1058 |
+| plain | large-token-rounded-bf16 | (8192, 7168) | torch.bfloat16 | 8192 | True | 2.8532 | 0.0621 | 0.0624 |
+
+## QuantPerChannelCastFusedExpandOp
+
+### tileops
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs | config |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| expand | tiny-expand-bf16 | (17, 128) | torch.bfloat16 | 32 | False | 0.0290 | 0.0004 | 0.0004 | {'register_staging': True} |
+| expand | near-one-expand-rounded-bf16 | (137, 512) | torch.bfloat16 | 144 | True | 0.0317 | 0.0070 | 0.0071 | {'register_staging': True} |
+| expand | small-expand-bf16 | (513, 512) | torch.bfloat16 | 1024 | False | 0.0302 | 0.0524 | 0.0528 | {'register_staging': True} |
+| expand | high-ratio-expand-fp32 | (513, 3072) | torch.float32 | 4096 | False | 0.1107 | 0.3429 | 0.5722 | {'register_staging': True} |
+| expand | medium-expand-fp32 | (1001, 3072) | torch.float32 | 2048 | False | 0.0680 | 0.2791 | 0.4658 | {'register_staging': True} |
+| expand | moe-expand-bf16 | (4001, 7168) | torch.bfloat16 | 8192 | False | 0.4753 | 0.3726 | 0.3746 | {'register_staging': True} |
+| expand | moe-expand-rounded-fp32 | (4001, 3072) | torch.float32 | 8192 | True | 0.2135 | 0.3555 | 0.5932 | {'register_staging': True} |
+| expand | large-tail-expand-rounded-bf16 | (4097, 7168) | torch.bfloat16 | 8192 | True | 0.4734 | 0.3741 | 0.3761 | {'register_staging': True} |
+
+### torch-eager
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| expand | tiny-expand-bf16 | (17, 128) | torch.bfloat16 | 32 | False | 0.0976 | 0.0001 | 0.0001 |
+| expand | near-one-expand-rounded-bf16 | (137, 512) | torch.bfloat16 | 144 | True | 0.1268 | 0.0018 | 0.0018 |
+| expand | small-expand-bf16 | (513, 512) | torch.bfloat16 | 1024 | False | 0.1328 | 0.0119 | 0.0120 |
+| expand | high-ratio-expand-fp32 | (513, 3072) | torch.float32 | 4096 | False | 0.9297 | 0.0408 | 0.0681 |
+| expand | medium-expand-fp32 | (1001, 3072) | torch.float32 | 2048 | False | 0.5051 | 0.0376 | 0.0627 |
+| expand | moe-expand-bf16 | (4001, 7168) | torch.bfloat16 | 8192 | False | 4.2261 | 0.0419 | 0.0421 |
+| expand | moe-expand-rounded-fp32 | (4001, 3072) | torch.float32 | 8192 | True | 1.7836 | 0.0426 | 0.0710 |
+| expand | large-tail-expand-rounded-bf16 | (4097, 7168) | torch.bfloat16 | 8192 | True | 4.2347 | 0.0418 | 0.0420 |
+
+## QuantPerChannelCastFusedRescaleOp
+
+### tileops
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs | config |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rescale | tiny-rescale | (128, 256) | torch.float8_e4m3fn | 128 | False | 0.0541 | 0.0030 | 0.0012 | {'register_staging': False} |
+| rescale | small-boundary-rescale-rounded | (256, 512) | torch.float8_e4m3fn | 256 | True | 0.0519 | 0.0127 | 0.0052 | {'register_staging': False} |
+| rescale | small-rescale | (512, 512) | torch.float8_e4m3fn | 512 | False | 0.0520 | 0.0253 | 0.0104 | {'register_staging': False} |
+| rescale | medium-rescale-rounded | (1024, 3072) | torch.float8_e4m3fn | 1024 | True | 0.0678 | 0.2327 | 0.0957 | {'register_staging': False} |
+| rescale | mid-token-rescale | (2048, 1024) | torch.float8_e4m3fn | 2048 | False | 0.0592 | 0.1777 | 0.0731 | {'register_staging': False} |
+| rescale | deepseek-v3-rescale | (4096, 7168) | torch.float8_e4m3fn | 4096 | False | 0.4520 | 0.3258 | 0.1340 | {'register_staging': False} |
+| rescale | qwen3-rescale-rounded | (4096, 3072) | torch.float8_e4m3fn | 4096 | True | 0.1996 | 0.3162 | 0.1300 | {'register_staging': False} |
+| rescale | large-token-rescale-rounded | (8192, 7168) | torch.float8_e4m3fn | 8192 | True | 0.8775 | 0.3356 | 0.1380 | {'register_staging': False} |
+
+### torch-eager
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rescale | tiny-rescale | (128, 256) | torch.float8_e4m3fn | 128 | False | 0.0757 | 0.0022 | 0.0009 |
+| rescale | small-boundary-rescale-rounded | (256, 512) | torch.float8_e4m3fn | 256 | True | 0.0843 | 0.0078 | 0.0032 |
+| rescale | small-rescale | (512, 512) | torch.float8_e4m3fn | 512 | False | 0.0778 | 0.0169 | 0.0070 |
+| rescale | medium-rescale-rounded | (1024, 3072) | torch.float8_e4m3fn | 1024 | True | 0.2988 | 0.0528 | 0.0217 |
+| rescale | mid-token-rescale | (2048, 1024) | torch.float8_e4m3fn | 2048 | False | 0.2099 | 0.0501 | 0.0206 |
+| rescale | deepseek-v3-rescale | (4096, 7168) | torch.float8_e4m3fn | 4096 | False | 2.2056 | 0.0668 | 0.0275 |
+| rescale | qwen3-rescale-rounded | (4096, 3072) | torch.float8_e4m3fn | 4096 | True | 0.9854 | 0.0640 | 0.0263 |
+| rescale | large-token-rescale-rounded | (8192, 7168) | torch.float8_e4m3fn | 8192 | True | 4.3503 | 0.0677 | 0.0278 |
+
+## QuantPerChannelCastFusedRescaleExpandOp
+
+### tileops
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs | config |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rescale_expand | tiny-expand-rescale | (17, 256) | torch.float8_e4m3fn | 32 | False | 0.0530 | 0.0008 | 0.0003 | {'register_staging': False} |
+| rescale_expand | near-one-expand-rescale-rounded | (137, 512) | torch.float8_e4m3fn | 144 | True | 0.0514 | 0.0072 | 0.0030 | {'register_staging': False} |
+| rescale_expand | small-expand-rescale | (513, 512) | torch.float8_e4m3fn | 1024 | False | 0.0518 | 0.0508 | 0.0210 | {'register_staging': False} |
+| rescale_expand | high-ratio-expand-rescale | (513, 3072) | torch.float8_e4m3fn | 4096 | False | 0.2159 | 0.2924 | 0.1203 | {'register_staging': False} |
+| rescale_expand | medium-expand-rescale-rounded | (1001, 3072) | torch.float8_e4m3fn | 2048 | True | 0.1351 | 0.2336 | 0.0961 | {'register_staging': False} |
+| rescale_expand | moe-expand-rescale | (4001, 7168) | torch.float8_e4m3fn | 8192 | False | 0.8624 | 0.3415 | 0.1405 | {'register_staging': False} |
+| rescale_expand | moe-expand-rescale-rounded | (4001, 3072) | torch.float8_e4m3fn | 8192 | True | 0.3827 | 0.3298 | 0.1357 | {'register_staging': False} |
+| rescale_expand | large-tail-expand-rescale-rounded | (4097, 7168) | torch.float8_e4m3fn | 8192 | True | 0.8608 | 0.3421 | 0.1407 | {'register_staging': False} |
+
+### torch-eager
+
+| variant | label | x_shape | dtype | num_tokens_out | round_sf | latency_ms | tflops | bandwidth_tbs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| rescale_expand | tiny-expand-rescale | (17, 256) | torch.float8_e4m3fn | 32 | False | 0.1159 | 0.0004 | 0.0002 |
+| rescale_expand | near-one-expand-rescale-rounded | (137, 512) | torch.float8_e4m3fn | 144 | True | 0.1325 | 0.0028 | 0.0012 |
+| rescale_expand | small-expand-rescale | (513, 512) | torch.float8_e4m3fn | 1024 | False | 0.1343 | 0.0196 | 0.0081 |
+| rescale_expand | high-ratio-expand-rescale | (513, 3072) | torch.float8_e4m3fn | 4096 | False | 0.9834 | 0.0642 | 0.0264 |
+| rescale_expand | medium-expand-rescale-rounded | (1001, 3072) | torch.float8_e4m3fn | 2048 | True | 0.6105 | 0.0517 | 0.0213 |
+| rescale_expand | moe-expand-rescale | (4001, 7168) | torch.float8_e4m3fn | 8192 | False | 4.9585 | 0.0594 | 0.0244 |
+| rescale_expand | moe-expand-rescale-rounded | (4001, 3072) | torch.float8_e4m3fn | 8192 | True | 2.1517 | 0.0587 | 0.0241 |
+| rescale_expand | large-tail-expand-rescale-rounded | (4097, 7168) | torch.float8_e4m3fn | 8192 | True | 4.9861 | 0.0591 | 0.0243 |

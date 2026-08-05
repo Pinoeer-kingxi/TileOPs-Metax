@@ -14,13 +14,14 @@ Rescale-Expand 继续使用 shared staging。公开 Op 接口和计算语义没�
 | 项目 | 内容 |
 |---|---|
 | 主仓库 | `/data/TileOPs-Metax` |
-| 主分支 | `feat/quant-per-channel-cast-fused` |
+| 主分支 | `main` |
 | 分析基线提交 | `2b833dc` |
 | 原迁移实现提交 | `967b65b` |
 | `tile_k=64`/固定基线提交 | `253fe14e7c33e5c9851e6120d46caf78cbe3d13b` |
 | register staging 提交 | `6ec6bde` |
 | 测试与精确 A/B 入口提交 | `3a0f2c0` |
 | augenstern 70 项矩阵提交 | `266fabb` |
+| augenstern 32 项性能矩阵适配提交 | `d85cb35` |
 | 当前实测提交 | `ec3f87d6b357f9d97ab80cc49ee783ed4b4db742` |
 | Rescale shared 预算门禁提交 | `c9655a2` |
 | 生产 Kernel SHA256 | `3b7df342a2dba2db0988210dc5aa608793cc708cc08bb35e748a1010e854d30c` |
@@ -35,8 +36,10 @@ Rescale-Expand 继续使用 shared staging。公开 Op 接口和计算语义没�
 | augenstern 审查分支 | `exp/quant-per-channel-register-resident` |
 | augenstern 审查版本 | `387119e154c6cfa4d09b25823635814380af91f9` |
 | augenstern 测试最后提交 / blob | `c77cc75caa4b8a281a814b66b06102564ef33a01` / `11238539f3f64e2b5585a7a906067eab9d7e1e7c` |
+| augenstern 性能矩阵提交 / Benchmark blob | `2d65be6` / `189ac950959893619b77fa4fbe783f8b98cd33f1` |
 | 实测设备 | MetaX C500，25% sGPU，16000 MiB Vram Quota |
-| 实测日期 | 2026-08-04 |
+| 原 A/B 与 mcProfiler 实测日期 | 2026-08-04 |
+| 32 项性能矩阵实测日期 | 2026-08-05 |
 
 外部实现来源：
 
@@ -66,7 +69,8 @@ Kernel 的编译期 `register_staging=True/False` 做对照，避免把动态 sh
 3. 契约覆盖正数越界索引、负数 padding、空输入和非整块尾部；Op 有直接校验，
    但第 12 节记录的 position-cache identity 风险仍需独立修复。
 4. 本地 33 项正确性/契约测试与 augenstern 完整 70 项兼容矩阵互补；
-   前者覆盖外部分支缺失的失败语义，后者提供完整 shape 广度。
+   前者覆盖外部分支缺失的失败语义，后者提供完整 shape 广度；另有四变体
+   各 8 项的来源性能矩阵，并已在 C500 完整运行。
 5. FP8 输出使用逐元素完全一致的正确性门禁。
 6. 另有 7 项固定基线测试，以及完整 Benchmark、mcProfiler 和 Roofline
    证据。
@@ -137,6 +141,7 @@ Rescale/Rescale-Expand shared staging
 - 固定基线测试：[`tests/ops/test_per_channel_cast_fused_baselines.py`](../../../tests/ops/test_per_channel_cast_fused_baselines.py)
 - 固定 TileLang 基线：[`benchmarks/ops/per_channel_cast_fused_baselines.py`](../../../benchmarks/ops/per_channel_cast_fused_baselines.py)
 - Benchmark：[`benchmarks/ops/bench_per_channel_cast_fused.py`](../../../benchmarks/ops/bench_per_channel_cast_fused.py)
+- 32 项来源性能矩阵：[`benchmarks/ops/bench_per_channel_cast_fused_augenstern.py`](../../../benchmarks/ops/bench_per_channel_cast_fused_augenstern.py)
 - mcProfiler 驱动：[`benchmarks/ops/profile_per_channel_cast_fused.py`](../../../benchmarks/ops/profile_per_channel_cast_fused.py)
 - 一键复核脚本：[`scripts/run_quant_per_channel_cast_fused.sh`](../../../scripts/run_quant_per_channel_cast_fused.sh)
 - 原始实测文本：[`docs/summer-camp/quant_per_channel_cast_fused/artifacts/`](artifacts/)
@@ -282,6 +287,9 @@ FP32 shared staging 的 `tile_k=128` 需要 67,584 B，明确超过 C500 的
 - Plain/Expand 的 shared 对照由同一个生产 Kernel 构造，唯一变化是编译期
   `register_staging=False`。
 - 完整 9 workload 独立运行三轮。
+- 另有独立的 augenstern 来源矩阵：当前 `Quant*` Op、当前 manifest
+  `__suite: augenstern-performance` workload、当前 eager reference；不与
+  四方 9-workload 长期报告混合。
 
 三轮的候选和 shared-staging 结果高度一致；下表报告三次完整运行各自结果的
 中位数，而每次运行内部仍按三个 trial mean 的中位数统计。
@@ -341,6 +349,49 @@ Kernel 更快。除最小 Plain 和两组 Rescale 外，生产 Kernel 已经达�
 | run 1 | [benchmark_run1.txt](artifacts/benchmark_run1.txt) | `c8657fc39c8270dc9dfd7cd6609832426924253612dd7fb7af96000a45a92d8d` |
 | run 2 | [benchmark_run2.txt](artifacts/benchmark_run2.txt) | `802777a578097eb8dad1b30c0db35042549e71046ceed40dced19c7176490dfd` |
 | run 3 | [benchmark_run3.txt](artifacts/benchmark_run3.txt) | `08fe02d82be3be13b973bc9375bc45d93b52faae30c30e91bae2ff9671c6db8b` |
+
+### 7.4 augenstern 来源矩阵的当前 Op 适配
+
+远端性能提交 `2d65be6` 使用旧的 `PerChannelCastFused*Op` 和
+`tileops/kernels/per_channel_cast_fused_maca.py`；当前仓库的真实接口是
+`QuantPerChannelCastFused*Op`，Kernel 在
+`tileops/kernels/quant/per_channel_cast_fused.py`。适配工作因此分为三层：
+
+1. 将 32 个 shape、dtype、`round_sf`、label 和 Expand 输出 token 原样写入
+   当前 `quantization.yaml`，标记为 `__suite: augenstern-performance`。
+2. 新增独立 Benchmark 文件，从当前 manifest 读取矩阵，并把 Rescale 的
+   `x_sf` 映射成当前 `x_sf_invs`；Roofline 通过当前 Op 的
+   `ManifestBenchmark(...).profile()` 触发 `eval_roofline()`。
+3. 输入生成保持来源的随机 gather 和 FP8 构造，但在计时前调用当前仓库的
+   独立 reference 做 FP8 逐元素、scale 容差和异常传播门禁。
+
+旧的 9 项四方入口过滤该 suite，因而仍能做长期 production/shared/fixed
+TileLang/eager A/B；新入口只比较当前 production/eager，避免把外部旧算子、
+不同 Kernel 路径或不同 staging 策略混入加速归因。
+
+真实 C500 命令和结果：
+
+```text
+benchmark-matrix --collect-only -q: 32 tests collected
+benchmark-matrix -m smoke: 4 passed, 28 deselected
+benchmark-matrix: 32 passed in 117.11s
+stable four-way benchmark: 9 passed in 32.94s
+```
+
+原始报告为
+[`benchmark_augenstern_matrix.txt`](artifacts/benchmark_augenstern_matrix.txt)，
+SHA256 为
+`0ec62a2288e7bfa890b2b022447962c0d3437d69810636c35b52b15430ee7405`。
+production 相对 eager 的 case 算术平均加速比为 Plain `3.859x`、Expand
+`6.723x`、Rescale `3.406x`、RescaleExpand `4.199x`，总体 `4.547x`；32
+项均无回退。最大单项为 Expand `4097x7168->8192` BF16 rounded，`8.945x`；
+最小单项为 Rescale `128x256` FP8，`1.399x`。逐项延迟表和输入构造见主
+README 第 7.4 节，原始 121 行报告保留所有 Roofline 字段和 Kernel config。
+
+该矩阵的 production 语义 Roofline 最高为 `0.3745 TFLOP/s` 和
+`0.5932 TB/s`。它证明当前实现覆盖了远端中大型 shape，但不等价于 32 份
+mcProfiler 物理采样；硬件 shared/private/HBM counter 仍以第 9 节五份
+multi-batch per-kernel 报告为准。
 
 ## 8. 正确性验证
 
@@ -616,6 +667,19 @@ Rescale control 的 `case_I=324.795 > 260`，位于 profiler 的 compute-side。
 流量；它通过删除片上 shared 往返提高同等语义工作量下的吞吐。Rescale 仍受
 shared staging、scale 读取和额外乘法影响，是下一项独立性能实验的重点。
 
+### 10.5 32 项矩阵的语义 Roofline
+
+32 项矩阵复用同一组公式，production 最高 achieved throughput 为
+`0.3745 TFLOP/s`，最高 semantic bandwidth 为 `0.5932 TB/s`。后者来自
+Expand FP32 `4001x3072->8192`，相当于整卡 1,843.2 GB/s 参考的 32.18%，
+但达到未校准 25% 线性参考的 128.73%。这是 Expand 重复 gather 的 Manifest
+逻辑流量和 cache 复用共同造成的口径现象，不能解读成物理 HBM 超峰值。
+
+Plain/Expand 的 `0.599～0.995 FLOP/B` 与 Rescale 两路约 `2.431 FLOP/B`
+都远低于 mcProfiler 整卡 ridge point 260 FLOP/B，但严格的 hardware-side
+分类仍只适用于实际采样的五份报告。32 项矩阵的价值是验证 shape 广度下的
+稳定延迟、正确性和语义 Roofline，不冒充 32 项物理 counter 测量。
+
 ## 11. 外部优化的采用边界
 
 ### 11.1 scale load 加 shuffle 广播
@@ -770,6 +834,10 @@ ACoolFIsh 分支还包含 custom-op/fake/meta 等 `torch.compile` 调用边界�
 6. FP8 输出逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
 7. benchmark 增加同 Kernel shared-staging 对照，计时前与独立 reference 比较。
 8. 三次完整运行证明 Plain/Expand 五组无回退，收益 3.38%～76.78%。
+9. 将 augenstern 32 项性能矩阵按当前四个 `Quant*` Op、`x_sf_invs` 和
+   Op-local Roofline 完成适配，与 9 项四方 A/B 用 `__suite` 隔离。
+10. C500 完整性能矩阵 `32 passed in 117.11s`；32 项 production 均快于
+    eager PyTorch，原始报告和 SHA256 已归档。
 
 ### 13.4 mcProfiler 与 Roofline 验收（已完成）
 
@@ -827,8 +895,10 @@ specialization，完整块快速路径仍可能改善最小 workload，但两者
 7. `docs(quant): record register-staging evidence`（已完成，`dbf08f7`）
 8. `test(quant): port augenstern correctness matrix`（本次，包含 70 项矩阵与统一脚本入口）
 9. `docs(quant): record full correctness matrix and optimization delta`（本次）
-10. `fix(quant): make position validation cache identity-safe`（后续独立提交）
-11. `optimize(quant): vectorize small rescale staging`（仅在独立 A/B 通过后）
+10. `bench(quant): port augenstern performance matrix`（已完成，`d85cb35`）
+11. `docs(quant): record performance matrix results`（本次）
+12. `fix(quant): make position validation cache identity-safe`（后续独立提交）
+13. `optimize(quant): vectorize small rescale staging`（仅在独立 A/B 通过后）
 
 不要把 vec4、动态 shape、完整块快速路径、validation cache 或
 `torch.compile` 调用边界放入同一个提交。
@@ -856,14 +926,14 @@ specialization，完整块快速路径仍可能改善最小 workload，但两者
 
 ## 16. 下一步建议
 
-当前 register staging 的实现、正确性和三轮 Benchmark 已完成。下一步按以下
-顺序推进：
+当前 register staging 的实现、103 项正确性、三轮 9 项四方 Benchmark 和
+32 项来源性能矩阵均已完成。下一步按以下顺序推进：
 
 1. 独立修复 position validation cache 的地址复用风险。
 2. 在当前安全 Rescale Kernel 上单变量实验 FP8 vec4。
 3. 只有在有明确冷启动或 cache 需求时，再评估动态 token Kernel。
 4. 不开展 `torch.compile` 集成，也不重新引入已经回退的独立 scale shuffle。
 
-每个后续点都必须保持 103 项正确性测试、7 项固定基线测试，以及 production、
-同 Kernel shared 对照、固定 TileLang、eager PyTorch 的 Benchmark 可复现，
-并使用独立提交保证性能归因。
+每个后续点都必须保持 103 项正确性测试、7 项固定基线测试、32 项来源性能
+矩阵，以及 production、同 Kernel shared 对照、固定 TileLang、eager PyTorch
+的 9 项 Benchmark 可复现，并使用独立提交保证性能归因。
