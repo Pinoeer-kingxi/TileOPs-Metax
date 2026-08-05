@@ -185,3 +185,31 @@ shuffle仅在tiny Plain（提升30.96%）和tiny Rescale（提升8.40%）胜出�
 此前103项与32项结果继续作为历史演进证据，不作为当前20项四方Benchmark
 完整运行的声明。重构早期`->32`代表性性能artifact已因原始TileKernels调度
 缺少不足128行的Expand尾块保护而删除，不用于当前可信对比。
+
+### 吸收TXY Rescale动态向量化
+
+在`47ccd16`建立`backup/quant-before-txy-vectorized-47ccd16`回退锚点后，只吸收
+TXY实现中与Rescale FP8访存相关的单变量优化；保留当前`tile_k=64`、混合
+staging和`amax_shared`归约，不吸收此前整体回退的4-lane amax shuffle。
+
+静态分派为：输出token不超过256时使用8 lanes/token（vec8）；普通中等规模
+使用16 lanes/token（vec4）；非Expand输出至少4096或Expand输出至少2048时
+使用32 lanes/token（vec2）。Expand position广播相应改为subgroup-aware源lane，
+动态reduction scratch也计入shared-memory门禁。
+
+正确性入口新增5项分派边界测试，结果为`45 passed in 78.72s`；原有40项数值
+与契约覆盖全部保留。性能只对受影响的10项Rescale/RescaleExpand正式Manifest
+workload执行旧/新production-only同协议A/B，未重复运行eager、`torch.compile`
+和固定TileKernels三个外部基线。协议仍为10次warmup、50次repeat、3次trial。
+
+| 变体 | 新版胜出 | 几何平均旧版/新版 | 几何平均延迟降低 |
+|---|---:|---:|---:|
+| Rescale | 5/5 | 1.2232x | 18.25% |
+| RescaleExpand | 5/5 | 1.2107x | 17.40% |
+| 总体 | 10/10 | 1.2169x | 17.83% |
+
+逐项原始输出及汇总保存在仓库同级目录：
+
+```text
+/data/gxy/TileOPs-Metax-team-results/txy-vectorized-ab-2026-08-05/
+```
