@@ -7,6 +7,18 @@ TileOPs-Metax 的完整过程，包括接口对应关系、代码目录、TileLa
 迁移完成后的外部实现对比、`tile_k=64` 两轮 A/B、失败实验和分阶段开发
 计划见 [深度优化分析与开发计划](OPTIMIZATION_ANALYSIS.md)。
 
+> 2026-08-05：测试入口合并、三类性能基线与原始TileKernels调度回退见
+> [本轮重构记录](REFACTOR_LOG_2026-08-05.md)。下文旧性能表使用的是历史全路径
+> `tile_k=64`适配baseline，不代表本轮恢复到BF16=128、Rescale=256后的新结果。
+> 当前提交前收敛状态为：40项production功能测试、20项正式Manifest Benchmark
+> workload（四个变体各5项），以及位于`benchmarks/tests/`的7项TileKernels
+> baseline可信度测试。下文涉及103项/32项矩阵的章节仅保留为历史迭代证据。
+>
+> 同日迁移至无sGPU切片的完整C500后再次完成40项功能和20项四方性能回归，
+> 全部进程状态为0、cgroup OOM为0。最新正式结果位于仓库同级目录
+> `/data/gxy/TileOPs-Metax-team-results/full-c500-2026-08-05/`；旧切片实例的
+> SIGKILL及`3.4424x/2.2470x`数据仅作为迁移前历史证据。
+
 ## 1. 迁移信息
 
 | 项目 | 内容 |
@@ -64,14 +76,11 @@ TileOPs-Metax/
 ├── tileops/kernels/quant/
 │   ├── __init__.py
 │   └── per_channel_cast_fused.py
-├── tileops/testing/per_channel_cast_fused.py
 ├── tests/ops/test_per_channel_cast_fused.py
-├── tests/ops/test_per_channel_cast_fused_augenstern.py
-├── tests/ops/test_per_channel_cast_fused_baselines.py
 ├── workloads/per_channel_cast_fused.py
+├── benchmarks/tests/test_per_channel_cast_fused_baseline.py
 ├── benchmarks/ops/per_channel_cast_fused_baselines.py
 ├── benchmarks/ops/bench_per_channel_cast_fused.py
-├── benchmarks/ops/bench_per_channel_cast_fused_augenstern.py
 ├── benchmarks/ops/profile_per_channel_cast_fused.py
 └── scripts/run_quant_per_channel_cast_fused.sh
 ```
@@ -83,16 +92,13 @@ TileOPs-Metax/
 | `tileops/manifest/quantization.yaml` | 定义四个算子的输入输出、参数、shape 规则、workload 和 Roofline 公式 |
 | `tileops/ops/quant/per_channel_cast_fused.py` | 对外 Op 接口；负责参数、dtype、shape、CUDA、连续性和索引检查，以及 Kernel 缓存和调度 |
 | `tileops/kernels/quant/per_channel_cast_fused.py` | 真正执行设备计算的 TileLang Kernel |
-| `tileops/testing/per_channel_cast_fused.py` | 独立 PyTorch 参考实现，不调用被测 Kernel |
-| `tests/ops/test_per_channel_cast_fused.py` | 本地 33 项正确性、边界、资源和失败契约测试 |
-| `tests/ops/test_per_channel_cast_fused_augenstern.py` | augenstern `387119e` 的 70 项功能/正确性矩阵；保留原始 shape、dtype、round 和用例 ID，适配本地 Op 与独立 reference |
-| `tests/ops/test_per_channel_cast_fused_baselines.py` | 固定 TileLang 基线与 eager PyTorch 的独立一致性测试 |
+| `tests/ops/test_per_channel_cast_fused.py` | 单一 production 正确性入口：40项路径、dtype、数值边界与异常测试；包含独立 PyTorch oracle |
+| `benchmarks/tests/test_per_channel_cast_fused_baseline.py` | 固定 TileKernels TileLang 基线的来源、调度参数与 eager PyTorch 一致性测试 |
 | `workloads/per_channel_cast_fused.py` | Benchmark 输入生成 |
-| `benchmarks/ops/per_channel_cast_fused_baselines.py` | 固定官方 `dev` 算法结构和语义的 benchmark-only 上游式 TileLang 基线；显式适配当前 Benchmark 接口，并在 C500 上使用 `tile_k=64` |
-| `benchmarks/ops/bench_per_channel_cast_fused.py` | Manifest 驱动的生产 Kernel、shared-staging 对照、固定 TileLang 与 eager PyTorch 四方 Benchmark |
-| `benchmarks/ops/bench_per_channel_cast_fused_augenstern.py` | 适配当前 `Quant*` Op 的 augenstern 32 项来源性能矩阵；计时前严格校验正确性，比较 production 与 eager PyTorch |
+| `benchmarks/ops/per_channel_cast_fused_baselines.py` | 固定官方 `dev@0266ab7` TileLang 基线；BF16保留tile128、Rescale保留tile256，仅FP32因C500 shared限制改为tile64 |
+| `benchmarks/ops/bench_per_channel_cast_fused.py` | 单一性能入口：20项Manifest workload；对比 eager、torch.compile 和 TileKernels TileLang |
 | `benchmarks/ops/profile_per_channel_cast_fused.py` | mcProfiler 稳定驱动；固定输入构造、workgroup 期望值、commit、dirty 状态和 Kernel SHA256 |
-| `scripts/run_quant_per_channel_cast_fused.sh` | smoke、完整正确性、固定基线、9 项四方 Benchmark、32 项性能矩阵、质量门禁和 mcProfiler 的统一入口 |
+| `scripts/run_quant_per_channel_cast_fused.sh` | smoke、完整正确性、baseline可信度、20项四方Benchmark、质量门禁和mcProfiler的统一入口 |
 | `docs/summer-camp/quant_per_channel_cast_fused/artifacts/` | 三轮四方 Benchmark、32 项性能矩阵、最终回归和五份目标 Kernel profiler 原始文本 |
 | `tileops/ops/__init__.py` | 导出四个公开 Op |
 
@@ -356,11 +362,14 @@ thread-local/shared 读写不计入 HBM Roofline bytes。特别需要注意：Ke
 
 ### 6.1 独立参考实现
 
-参考实现位于：
+production正确性oracle位于：
 
 ```text
-tileops/testing/per_channel_cast_fused.py
+tests/ops/test_per_channel_cast_fused.py
 ```
+
+性能测试在`benchmarks/ops/bench_per_channel_cast_fused.py`中维护独立的
+PyTorch实现，避免测试oracle与性能基线共享实现
 
 参考实现固定到上游提交 `0266ab7` 的语义，只使用 eager PyTorch 原语，
 不经过其他编译器或调用被测 TileLang Kernel。它独立完成：
@@ -381,32 +390,8 @@ tileops/testing/per_channel_cast_fused.py
 
 ### 6.2 测试覆盖
 
-正确性分为两个互补套件：
-
-- 本地 33 项测试，重点覆盖公开接口、边界、资源配置和失败契约；
-- augenstern 兼容矩阵 70 项，与
-  `exp/quant-per-channel-register-resident@387119e` 一一对应。远端 HEAD
-  只修改文档，测试代码最后更新为 `c77cc75`。
-
-70 项兼容矩阵的分组固定为：
-
-| 分组 | 数量 | 覆盖 |
-|---|---:|---|
-| 基础变体 | 17 | 四个 Op、BF16/FP32/FP8、round/non-round、对齐/尾块 |
-| token sweep，`hidden=512` | 20 | `17/137/513/1001` 的 Expand 到 `32/144/1024/2048`，以及 `128/256/512/1024` Plain/Rescale |
-| token × hidden | 26 | `hidden=128/256/3072/7168` 与中大 token 组合 |
-| Gather pattern | 3 | sequential、repeated、all-invalid |
-| 数值边界 | 3 | zero、`1e-8`、交替正负 `1e4` |
-| 构造参数 | 1 | 非法 `fmt`、token/channel group |
-| **合计** | **70** | 源码内有分组计数和总数断言 |
-
-矩阵沿用远端 `torch.manual_seed(0)` 和 Rescale 的
-`real / x_sf_invs -> FP8` 输入构造。与远端不同的是，本地不引入
-`FixtureBase/TestBase`，不允许 reference OOM 静默返回，也不使用非 MetaX
-的宽松 match-ratio/cosine 分支。所有用例统一使用本地独立 eager
-PyTorch reference 和相同的严格输出门禁。
-
-本地 33 项套件额外覆盖：
+production功能测试收敛为单文件40项。规模变化本身不重复堆叠用例，测试预算
+优先覆盖新代码路径、数值语义、资源策略和失败契约：
 
 - BF16 和 FP32 plain 输入；
 - FP8 e4m3 QuantTensor/rescale 输入；
@@ -431,6 +416,7 @@ PyTorch reference 和相同的严格输出门禁。
 - 非连续输入；
 - 非法 `pos_to_token`；
 - 非法 `x_sf_invs` shape 和 dtype。
+- 非法 `round_sf` 类型、Expand输出对齐/rank/dtype，以及Rescale scale设备；
 - Plain/Expand 必须启用 thread-local staging，Rescale 两条路径必须保留
   shared staging；
 - 精确门禁 Plain/Expand 为 1,024 B、Rescale 为 9,216 B，并保留
@@ -440,7 +426,8 @@ PyTorch reference 和相同的严格输出门禁。
 
 - 上游提交与两个源文件 SHA256 的 provenance 元数据常量门禁；测试不联网重新
   下载或哈希上游仓库；
-- 固定 `tile_k == 64`；
+- 调度门禁：BF16 Plain/Expand为128、Rescale两路为256，仅C500无法容纳的
+  FP32 Plain/Expand为64；
 - BF16、FP32、FP8 输入；
 - plain、expand、rescale、rescale-expand；
 - 正负极值、随机输入、逆序、重复和 padding position；
@@ -464,11 +451,7 @@ python scripts/validate_manifest.py
 python scripts/validate_manifest.py \
   --check-op QuantPerChannelCastFusedOp --strict
 python -m pytest -q tests/ops/test_per_channel_cast_fused.py
-python -m pytest -q tests/ops/test_per_channel_cast_fused_augenstern.py
-python -m pytest -q \
-  tests/ops/test_per_channel_cast_fused.py \
-  tests/ops/test_per_channel_cast_fused_augenstern.py
-python -m pytest -q tests/ops/test_per_channel_cast_fused_baselines.py
+python -m pytest -q benchmarks/tests/test_per_channel_cast_fused_baseline.py
 python -m pytest -q benchmarks/tests
 python -m pytest -q tests/test_ops_manifest.py
 ```
@@ -479,34 +462,38 @@ python -m pytest -q tests/test_ops_manifest.py
 |---|---|
 | 全量 Manifest | 通过；仓库既有 advisory warning 不阻塞 |
 | 本算子 strict Manifest | 通过；10 条 synthetic shape precondition warning |
-| 本地契约测试 | `33 passed in 26.60s` |
-| augenstern 70 项兼容矩阵 | `70 passed in 183.35s` |
-| 统一 `correctness` 入口 | `103 passed in 32.08s`（编译缓存已热） |
-| 固定基线正确性测试 | `7 passed in 23.51s` |
-| Benchmark 基础测试 | `17 passed in 24.36s` |
-| Ops Manifest 测试 | `7 passed in 23.44s` |
-| 最终四方 Benchmark 回归 | `9 passed in 32.64s` |
-| 32 项 suite 接入后的四方回归 | `9 passed in 32.94s`；仍只执行原 9 项 |
-| 32 项来源性能矩阵收集 | `32 tests collected`；原四方入口仍为 `9 tests` |
-| 32 项性能 smoke | `4 passed, 28 deselected in 35.52s` |
-| 32 项完整 C500 Benchmark | `32 passed in 117.11s` |
-| Ruff check | `All checks passed!` |
-| Ruff format | 通过 |
+| production功能测试 | `40 passed in 236.56s` |
+| 固定基线可信度测试 | `7 passed in 26.31s` |
+| Benchmark 基础测试（不含本算子基线测试） | `17 passed in 24.80s` |
+| Ops Manifest 测试 | `7 passed in 23.20s` |
+| 正式性能项收集 | `20 tests collected`，四变体各5项 |
+| 四变体代表项 | 均显示`1 passed`并写出报告；pytest报告后进程受环境SIGKILL，退出码137 |
+| Ruff | 当前C500环境未安装，未执行 |
 | `py_compile` | 通过 |
 | `git diff --check` | 通过 |
 | `pre-commit` | 环境未安装，未执行 |
 
-本次只安装了独立检查工具 `ruff==0.14.13`：
+没有安装或覆盖TileOps、TileLang、PyTorch或额外开发依赖。当前以
+`py_compile`、Manifest、pytest和`git diff --check`的分项结果作为检查证据。
 
-```bash
-python -m pip install \
-  -i https://pypi.tuna.tsinghua.edu.cn/simple \
-  --no-deps ruff==0.14.13
-```
+20项完整性能回归随后按case独立进程完成，详细报告位于仓库同级目录
+`/data/gxy/TileOPs-Metax-team-results/full-benchmark-2026-08-05/`：
 
-下载源为已配置的清华/阿里云国内镜像。没有安装或覆盖 TileOps、TileLang、
-PyTorch，也没有使用会解析其依赖的安装命令。`pre-commit` 当前未安装，故以
-Ruff、`py_compile`、Manifest 和 pytest 的分项结果作为检查证据。
+| 对比对象 | 几何平均加速（baseline/production） | production胜出 |
+|---|---:|---:|
+| shared-staging消融（Plain/Expand） | 1.6506x | 10/10 |
+| 原始TileKernels TileLang | 2.2470x | 20/20 |
+| torch.compile | 0.6865x | 9/20 |
+| PyTorch eager | 3.4424x | 20/20 |
+
+每项均显示`1 passed`并写出报告；C500在pytest报告后的解释器退出清理阶段
+仍将进程SIGKILL（状态137），该环境问题不应被表述为干净退出。
+
+迁移到CPU内存上限128 GiB、无sGPU切片的完整C500后，20项全部重新运行且
+退出状态为0，CPU内存峰值约63.7 GiB、`oom_kill=0`。最新几何平均结果为：
+对原始TileKernels `2.2433x`、对eager `3.3876x`、对torch.compile
+`0.6731x`，Plain/Expand对shared-staging `1.6457x`。因此旧SIGKILL已经
+确认是32 GiB CPU内存上限导致，而不是C500显存不足。
 
 ## 7. Benchmark 实测
 
@@ -532,15 +519,11 @@ export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
    两条路径使用 shared staging。
 2. `tileops-shared-staging`：仅为 Plain/Expand 构造的同 Kernel 单变量对照；
    唯一变化是编译期 `register_staging=False`。
-3. `tilelang-baseline`：固定自官方 TileKernels-Metax `dev@0266ab7` 的
-   上游式 TileLang 算法基线。它保留核心 tile、线程映射、shared staging、
-   两遍归约/量化和动态 token 结构，并显式展开配置与 scale helper 以接入当前
-   Benchmark；C500 调度选择为全路径 `tile_k=64`。它不是上游源文件的逐字副本，
-   因此文档不把差异夸大为“只有一行 tile 修改”。该基线独立保存在
-   `benchmarks/ops/per_channel_cast_fused_baselines.py`，不会随生产 Kernel
-   后续优化而漂移。
-4. `torch-eager`：`tileops/testing/per_channel_cast_fused.py` 中的独立
-   eager PyTorch 原语组合。
+3. `tilekernels-tilelang`：固定自官方TileKernels-Metax `dev@0266ab7`。
+   BF16保留`tile_k=128`，Rescale两路保留`tile_k=256`；仅FP32因C500
+   64 KiB shared-memory限制改为`tile_k=64`。
+4. `torch-compile`：benchmark本地PyTorch实现经`torch.compile(fullgraph=True)`。
+5. `torch-eager`：benchmark本地普通PyTorch原语组合。
 
 每个 case 在计时前先让所有可用 TileLang 路径分别与 eager PyTorch 比较；
 FP8 输出必须逐元素完全一致，scale 使用 `atol=1e-7, rtol=1e-6`。
@@ -614,7 +597,10 @@ SHA256 为 `9566cdc0f60a86153d296efe5975649eb8bba40f505803434bd857e696fff3dc`。
 - 固定 TileLang 仍是独立的上游算法基线；shared-staging 则是用于归因
   thread-local staging 收益的单变量对照，两者用途不同。
 
-### 7.4 augenstern 32 项来源性能矩阵
+### 7.4 历史：augenstern 32 项来源性能矩阵
+
+> 本节仅保留早期实验溯源。当前已删除个人suite标记和独立矩阵入口，正式
+> Benchmark以Manifest中的20项四方对比为准，以下旧命令不再可用。
 
 远端 `exp/quant-per-channel-register-resident@387119e` 的性能提交为
 `2d65be6`。它的函数名、Op 名和源码路径与当前仓库不同，因此本仓没有直接
@@ -630,8 +616,8 @@ SHA256 为 `9566cdc0f60a86153d296efe5975649eb8bba40f505803434bd857e696fff3dc`。
 | `tileops/kernels/per_channel_cast_fused_maca.py` | `tileops/kernels/quant/per_channel_cast_fused.py` |
 | 远端 `PerChannelCastFusedWorkload` | 当前 workload 子类，保持当前 Op 的输入顺序和 shape contract |
 
-32 项配置已经加入当前 `tileops/manifest/quantization.yaml`，用
-`__suite: augenstern-performance` 标识；原有 9 项稳定四方 A/B 不受影响。
+32项配置曾加入`tileops/manifest/quantization.yaml`并使用
+`__suite: augenstern-performance`标识，现已收敛替换。
 矩阵分布为四种变体各 8 项：
 
 | 变体 | 输入 shape / 输出 token | dtype 与特性 |
@@ -1024,13 +1010,9 @@ Roofline 不能替代五份 mcProfiler per-kernel 物理 transaction 报告，�
 export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 
 ./scripts/run_quant_per_channel_cast_fused.sh smoke
-./scripts/run_quant_per_channel_cast_fused.sh matrix
 ./scripts/run_quant_per_channel_cast_fused.sh correctness
 ./scripts/run_quant_per_channel_cast_fused.sh baselines
 ./scripts/run_quant_per_channel_cast_fused.sh benchmark
-./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix --collect-only -q
-./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix -m smoke
-./scripts/run_quant_per_channel_cast_fused.sh benchmark-matrix
 ./scripts/run_quant_per_channel_cast_fused.sh gates
 
 ./scripts/run_quant_per_channel_cast_fused.sh profile plain-medium production
@@ -1040,13 +1022,10 @@ export PYTHONPATH=/opt/tilelang-metax-v0.1.10:/data/TileOPs-Metax:$PYTHONPATH
 ./scripts/run_quant_per_channel_cast_fused.sh profile rescale-control production
 ```
 
-`smoke` 快速检查本地套件和兼容矩阵的 smoke 用例；`matrix` 单独执行
-augenstern 70 项兼容矩阵；`correctness` 执行本地 33 项与矩阵 70 项，
-共 103 个 pytest 节点；`baselines`
-验证固定 provenance 常量和数值门禁；`benchmark` 运行四方 9-workload 报告；`gates`
+`smoke`快速检查production套件的smoke用例；`correctness`执行单文件40项
+production功能测试；`baselines`
+验证固定provenance常量和数值门禁；`benchmark`运行Manifest驱动的20项四方报告；`gates`
 统一运行 diff、Manifest、Benchmark 基础测试、Ops Manifest 和 Ruff 检查。
-`benchmark-matrix` 只运行当前 Op 适配的 32 项来源性能矩阵，避免把长期 9 项
-四方报告和来源覆盖矩阵混为一套统计。
 `profile` 由脚本调用 mcProfiler，并用稳定 driver 隔离目标 Kernel。
 
 ## 13. 完成状态
@@ -1060,13 +1039,12 @@ augenstern 70 项兼容矩阵；`correctness` 执行本地 33 项与矩阵 70 �
 | plain/expand/rescale/rescale-expand | 完成 |
 | C500 全路径 `tile_k=64` | 完成；含 shared-memory 门禁 |
 | 混合 thread-local/shared staging | 完成；Plain/Expand local，Rescale shared |
-| 正确性、边界、异常测试 | 本地 33 项 + augenstern 兼容矩阵 70 项，均已通过 |
+| 正确性、边界、异常测试 | 单一production入口40项，C500全部通过 |
 | 固定基线测试 | 7 项通过 |
 | eager PyTorch 基线 | 完成并固定上游 SHA |
-| 官方式 TileLang 基线 | 完成；`dev@0266ab7` + C500 `tile_k=64` |
-| Benchmark | 9 组四方 workload、3 次完整独立报告实测完成；来源 32 项矩阵 `32 passed` |
-| 32 项性能矩阵 | Plain/Expand/Rescale/RescaleExpand 各 8 项，C500 实测 `32 passed in 117.11s` |
-| 32 项原始报告 | [benchmark_augenstern_matrix.txt](artifacts/benchmark_augenstern_matrix.txt)，SHA256 `0ec62a2288e7bfa890b2b022447962c0d3437d69810636c35b52b15430ee7405` |
+| 官方式 TileLang 基线 | 完成；`dev@0266ab7`原调度，只有C500无法容纳的FP32路径改为`tile_k=64` |
+| Benchmark | Manifest正式20项，四变体各5项；统一对比production、eager、torch.compile、TileKernels TileLang |
+| 历史32项矩阵 | 保留文档和artifact用于演进回顾，不是当前执行入口 |
 | profile driver/runner | 完成；支持 production/shared 单变量采样 |
 | mcProfiler | Plain/Expand 同协议 A/B 与 Rescale 控制组共 5 份精确报告完成 |
 | Roofline | 9 组语义 Roofline、整卡保守参考与未校准 25% 线性参考完成 |
