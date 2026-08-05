@@ -237,3 +237,16 @@ mcTracer保留用于后续Runtime API、同步和多Kernel时间线诊断。
 ```text
 /data/gxy/TileOPs-Metax-team-results/dynamic-tilek-2026-08-05/
 ```
+
+### PR A #29 原始9项兼容复测
+
+当前20项Manifest保持不变，另以独立进程完整复测PR A `81a39fd`定义的9项
+workload。本轮比较production、PyTorch eager和固定上游TileKernels TileLang，
+按约定不运行`torch.compile`；协议为10次warmup、50次repeat、3次trial。
+
+9项全部通过严格正确性门禁。production相对eager几何平均`5.2789x`，相对
+TileKernels几何平均`3.2286x`，两组对比均9/9胜出。完整逐项输出和汇总位于：
+
+```text
+/data/gxy/TileOPs-Metax-team-results/pr-a9-compat-2026-08-05/
+```

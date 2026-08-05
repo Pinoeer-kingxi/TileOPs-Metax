@@ -65,6 +65,9 @@ python -m pytest -q benchmarks/tests
 - [x] Plain/Expand vec4单变量A/B：10/10胜出，几何平均`1.2555x`，单项
   `1.1253x–1.3922x`。
 - [x] `tile_k=128`失败消融如实记录：0/10胜出，平均增加57.62%延迟，已回退。
+- [x] PR A #29原始9项兼容集已额外复测，不改变当前20项Manifest。9项均通过
+  严格正确性门禁；production相对eager几何平均`5.2789x`、相对固定上游
+  TileKernels几何平均`3.2286x`，均为9/9胜出。本轮按约定未运行torch.compile。
 - [x] mcProfiler已覆盖Plain/Expand staging前后和Rescale vec8/vec4/vec2；未
   观察到Private Read/Write spill，并保留shared、wave和访存计数。
 - [ ] 在最终GitLink PR B代码提交上重新执行20项四方Benchmark并归档报告。
@@ -77,6 +80,7 @@ python -m pytest -q benchmarks/tests
 /data/gxy/TileOPs-Metax-team-results/full-c500-2026-08-05/
 /data/gxy/TileOPs-Metax-team-results/txy-vectorized-ab-2026-08-05/
 /data/gxy/TileOPs-Metax-team-results/dynamic-tilek-2026-08-05/
+/data/gxy/TileOPs-Metax-team-results/pr-a9-compat-2026-08-05/
 ```
 
 ## 5. 官方提交门禁
